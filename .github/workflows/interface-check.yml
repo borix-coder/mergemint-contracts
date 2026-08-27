@@ -3,6 +3,7 @@ name: Interface Compatibility Check
 on:
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   interface-check:
@@ -19,7 +20,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install Stellar CLI
-        run: cargo install stellar-cli
+        run: cargo install stellar-cli --version 23.0.1 --locked
 
       - name: Build contract
         run: cargo build --release --target wasm32v1-none
