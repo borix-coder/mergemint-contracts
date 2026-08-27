@@ -190,6 +190,68 @@ describe("BountyRefresh", function () {
         });
     });
 
+    describe("Access Control Matrix", function () {
+        // Table-driven check: every state-changing function restricted to
+        // the owner must reject every non-privileged caller role with the
+        // same Ownable revert reason. This guards against a future change
+        // accidentally loosening (or forgetting) the onlyOwner modifier on
+        // any one of these entry points.
+        const RESTRICTED_FUNCTIONS = [
+            {
+                name: "refreshBounty",
+                invoke: (contract, caller) => contract.connect(caller).refreshBounty([addr1.address]),
+            },
+            {
+                name: "refreshBountyParallel",
+                invoke: (contract, caller) =>
+                    contract.connect(caller).refreshBountyParallel([addr1.address, addr2.address], 2),
+            },
+            {
+                name: "queueContributorsForRefresh",
+                invoke: (contract, caller) =>
+                    contract.connect(caller).queueContributorsForRefresh([addr1.address]),
+            },
+            {
+                name: "processPendingBatch",
+                invoke: (contract, caller) => contract.connect(caller).processPendingBatch(1),
+            },
+            {
+                name: "setBountyManager",
+                invoke: (contract, caller) => contract.connect(caller).setBountyManager(addr1.address),
+            },
+        ];
+
+        // Non-privileged caller roles the matrix exercises against each
+        // restricted function above.
+        const NON_PRIVILEGED_ROLES = [
+            { role: "random contributor #1", getSigner: () => addr1 },
+            { role: "random contributor #2", getSigner: () => addr2 },
+            { role: "random contributor #3", getSigner: () => addr3 },
+            { role: "random contributor #4", getSigner: () => addr4 },
+            { role: "random contributor #5", getSigner: () => addr5 },
+        ];
+
+        RESTRICTED_FUNCTIONS.forEach(({ name, invoke }) => {
+            describe(name, function () {
+                NON_PRIVILEGED_ROLES.forEach(({ role, getSigner }) => {
+                    it(`Should reject call from ${role}`, async function () {
+                        await expect(invoke(bountyRefresh, getSigner())).to.be.revertedWith(
+                            "Ownable: caller is not the owner"
+                        );
+                    });
+                });
+            });
+        });
+
+        it("Should allow the owner to call every restricted function", async function () {
+            for (const { name, invoke } of RESTRICTED_FUNCTIONS) {
+                await expect(invoke(bountyRefresh, owner)).to.not.be.revertedWith(
+                    "Ownable: caller is not the owner"
+                );
+            }
+        });
+    });
+
     describe("Reentrancy Protection", function () {
         it("Should prevent reentrancy in refreshBounty", async function () {
             const ReentrancyAttacker = await ethers.getContractFactory("ReentrancyAttacker");
