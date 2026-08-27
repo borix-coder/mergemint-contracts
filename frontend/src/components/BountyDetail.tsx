@@ -11,10 +11,12 @@ interface BountyDetailProps {
 }
 
 export function BountyDetail({ bounty, network, onClaim }: BountyDetailProps) {
-  const { pending, error, result, run } = useTxFlow(network);
+  const { pending, error, result, optimistic, run } = useTxFlow(network);
 
   async function perform() {
-    await run(() => onClaim(bounty.id));
+    // Optimistically assume the claim will succeed so the UI updates right
+    // away; useTxFlow rolls this back automatically if the transaction fails.
+    await run(() => onClaim(bounty.id), { hash: "pending" });
   }
 
   return (
@@ -62,8 +64,11 @@ export function BountyDetail({ bounty, network, onClaim }: BountyDetailProps) {
         {pending ? "Submitting…" : "Claim"}
       </button>
 
+      {optimistic && (
+        <p className="tx-optimistic-note">Claim submitted — confirming on-chain…</p>
+      )}
       {error && <p className="error">{error}</p>}
-      <TxResultBanner result={result} />
+      {!optimistic && <TxResultBanner result={result} />}
     </div>
   );
 }
