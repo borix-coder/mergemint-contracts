@@ -201,4 +201,90 @@ describe("BountyRefresh", function () {
             );
         });
     });
+
+    describe("Gas Usage Regression", function () {
+        // Baselines captured against the current implementation of each
+        // hot-path function. GAS_TOLERANCE_PCT absorbs small, legitimate
+        // fluctuations (compiler/optimizer version bumps, minor refactors)
+        // while still catching a regression that meaningfully inflates the
+        // gas cost of a frequently-called function (e.g. an accidental
+        // storage read/write added to a loop body).
+        const GAS_TOLERANCE_PCT = 20;
+
+        const GAS_BASELINES = {
+            refreshBountySingle: 90000,
+            refreshBountyBatchOfThree: 220000,
+            refreshBountyParallel: 260000,
+            queueContributorsForRefresh: 150000,
+            processPendingBatch: 150000,
+        };
+
+        function maxAllowedGas(baseline) {
+            return baseline + Math.ceil((baseline * GAS_TOLERANCE_PCT) / 100);
+        }
+
+        function expectGasWithinBaseline(gasUsed, baseline, label) {
+            const upperBound = maxAllowedGas(baseline);
+            expect(
+                gasUsed.lte(upperBound),
+                `${label} gas usage regressed: used ${gasUsed.toString()}, ` +
+                    `expected <= ${upperBound} (baseline ${baseline} + ${GAS_TOLERANCE_PCT}% tolerance)`
+            ).to.equal(true);
+        }
+
+        it("refreshBounty (single contributor) should stay within its gas baseline", async function () {
+            const tx = await bountyRefresh.refreshBounty([addr1.address]);
+            const receipt = await tx.wait();
+            expectGasWithinBaseline(
+                receipt.gasUsed,
+                GAS_BASELINES.refreshBountySingle,
+                "refreshBounty(single)"
+            );
+        });
+
+        it("refreshBounty (batch of 3) should stay within its gas baseline", async function () {
+            const contributors = [addr1.address, addr2.address, addr3.address];
+            const tx = await bountyRefresh.refreshBounty(contributors);
+            const receipt = await tx.wait();
+            expectGasWithinBaseline(
+                receipt.gasUsed,
+                GAS_BASELINES.refreshBountyBatchOfThree,
+                "refreshBounty(batch of 3)"
+            );
+        });
+
+        it("refreshBountyParallel should stay within its gas baseline", async function () {
+            const contributors = [addr1.address, addr2.address, addr3.address, addr4.address, addr5.address];
+            const tx = await bountyRefresh.refreshBountyParallel(contributors, 2);
+            const receipt = await tx.wait();
+            expectGasWithinBaseline(
+                receipt.gasUsed,
+                GAS_BASELINES.refreshBountyParallel,
+                "refreshBountyParallel"
+            );
+        });
+
+        it("queueContributorsForRefresh should stay within its gas baseline", async function () {
+            const contributors = [addr1.address, addr2.address, addr3.address];
+            const tx = await bountyRefresh.queueContributorsForRefresh(contributors);
+            const receipt = await tx.wait();
+            expectGasWithinBaseline(
+                receipt.gasUsed,
+                GAS_BASELINES.queueContributorsForRefresh,
+                "queueContributorsForRefresh"
+            );
+        });
+
+        it("processPendingBatch should stay within its gas baseline", async function () {
+            const contributors = [addr1.address, addr2.address, addr3.address];
+            await bountyRefresh.queueContributorsForRefresh(contributors);
+            const tx = await bountyRefresh.processPendingBatch(3);
+            const receipt = await tx.wait();
+            expectGasWithinBaseline(
+                receipt.gasUsed,
+                GAS_BASELINES.processPendingBatch,
+                "processPendingBatch"
+            );
+        });
+    });
 });
