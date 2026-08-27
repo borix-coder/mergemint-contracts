@@ -1,5 +1,35 @@
 # Contract Architecture
 
+## Two Contract Codebases: Soroban (Rust) vs. Solidity
+
+This repository contains contract code for **two different chains**. A new
+contributor browsing the tree will find both `src/contract/` (Rust) and
+`contracts/bounty/` (Solidity) and could reasonably assume only one is
+actually live. This section clarifies the relationship and current status
+of each.
+
+| | `src/contract/` | `contracts/bounty/` |
+|---|---|---|
+| Language | Rust (`#[contracttype]`, `#[contractimpl]`) | Solidity `^0.8.0` |
+| Target chain | Stellar, via the Soroban VM | EVM-compatible chains |
+| Role | **Primary contract.** Owns bounty creation, claiming, completion, cancellation, and expiry — the full lifecycle documented below. | Standalone batch-refresh utility (`BountyRefresh.sol`) that calls out to an external `IBountyManager` to bulk-update contributor metrics. It does not create, claim, or pay out bounties itself. |
+| Status | **Live / actively developed.** This is the contract MergeMint deploys and the one the rest of this document (data flow, state machine, storage/TTL) describes. | **Not deployed.** No `hardhat.config.*` exists in this repo yet, and `IBountyManager` has no production implementation — only the `MockBountyManager` test double under `test/bounty/mocks/`. Treat it as an EVM-side prototype/utility contract, exercised solely by its own Hardhat test suite (`test/bounty/BountyRefresh.test.js`). |
+| Build/test tooling | `cargo build` / `cargo test` (see [CONTRIBUTING.md](../CONTRIBUTING.md)) | `npx hardhat test` |
+
+**Why both exist:** MergeMint's production bounty logic lives on Stellar
+via Soroban (`src/contract/`). The Solidity code under `contracts/bounty/`
+was added to explore a companion, permissioned batch-refresh mechanism for
+a possible future EVM-side integration (e.g. syncing contributor metrics
+into an EVM-based `IBountyManager`). It is intentionally decoupled from the
+Soroban contract — the two do not call each other and do not share state.
+
+If you're modifying bounty *lifecycle* behavior (create/claim/complete/
+cancel/expire), you want `src/contract/`. If you're modifying the
+EVM-side batch refresh mechanism or its mock/test harness, you want
+`contracts/bounty/` and `test/bounty/`.
+
+---
+
 ## Data Flow
 
 ```
