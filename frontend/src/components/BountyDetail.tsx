@@ -2,7 +2,7 @@ import { useTxFlow } from "../hooks/useTxFlow";
 import { TxResultBanner } from "./TxResultBanner";
 import { CopyButton } from "./CopyButton";
 import { Bounty, NetworkName } from "../lib/types";
-import { shortenAddress } from "../lib/format";
+import { shortenAddress } from "../utils/format";
 
 interface BountyDetailProps {
   bounty: Bounty;
