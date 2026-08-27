@@ -43,13 +43,17 @@ export function buildFailedState(message: string): TxFlowState {
   return { pending: false, error: message, result: null, optimistic: false };
 }
 
+type Submit = () => Promise<{ hash: string; ledger?: number }>;
+
 export function useTxFlow(network: NetworkName) {
   const [state, setState] = useState<TxFlowState>(IDLE_STATE);
+  const [lastSubmit, setLastSubmit] = useState<{
+    submit: Submit;
+    optimisticResult?: Omit<SubmitResult, "network">;
+  } | null>(null);
 
-  async function run(
-    submit: () => Promise<{ hash: string; ledger?: number }>,
-    optimisticResult?: Omit<SubmitResult, "network">
-  ) {
+  async function run(submit: Submit, optimisticResult?: Omit<SubmitResult, "network">) {
+    setLastSubmit({ submit, optimisticResult });
     setState(buildOptimisticState(network, optimisticResult));
     try {
       const { hash, ledger } = await submit();
@@ -63,5 +67,11 @@ export function useTxFlow(network: NetworkName) {
     }
   }
 
-  return { ...state, run };
+  /** Re-invokes the most recent submit call, e.g. from a "Retry" action after a failure. */
+  async function retry() {
+    if (!lastSubmit) return undefined;
+    return run(lastSubmit.submit, lastSubmit.optimisticResult);
+  }
+
+  return { ...state, run, retry };
 }
