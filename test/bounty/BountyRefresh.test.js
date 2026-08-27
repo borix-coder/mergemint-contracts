@@ -201,4 +201,43 @@ describe("BountyRefresh", function () {
             );
         });
     });
+
+    describe("MockBountyManager invalid bounty status", function () {
+        // Mirrors the enum declared in MockBountyManager.sol.
+        const BountyStatus = { Active: 0, Paused: 1, Closed: 2 };
+
+        it("Should revert refreshContributor when the bounty is Paused", async function () {
+            await mockBountyManager.setBountyStatus(addr1.address, BountyStatus.Paused);
+            await expect(
+                mockBountyManager.refreshContributor(addr1.address)
+            ).to.be.revertedWith("Mock bounty status is not Active");
+        });
+
+        it("Should revert refreshContributor when the bounty is Closed", async function () {
+            await mockBountyManager.setBountyStatus(addr1.address, BountyStatus.Closed);
+            await expect(
+                mockBountyManager.refreshContributor(addr1.address)
+            ).to.be.revertedWith("Mock bounty status is not Active");
+        });
+
+        it("Should revert batchRefreshContributors when any contributor's bounty is invalid", async function () {
+            await mockBountyManager.setBountyStatus(addr2.address, BountyStatus.Closed);
+            await expect(
+                mockBountyManager.batchRefreshContributors([addr1.address, addr2.address])
+            ).to.be.revertedWith("Mock bounty status is not Active");
+        });
+
+        it("Should revert getContributorBounty when the bounty is not Active", async function () {
+            await mockBountyManager.setBountyStatus(addr3.address, BountyStatus.Paused);
+            await expect(
+                mockBountyManager.getContributorBounty(addr3.address)
+            ).to.be.revertedWith("Mock bounty status is not Active");
+        });
+
+        it("Should allow refreshContributor again once status is restored to Active", async function () {
+            await mockBountyManager.setBountyStatus(addr1.address, BountyStatus.Paused);
+            await mockBountyManager.setBountyStatus(addr1.address, BountyStatus.Active);
+            await expect(mockBountyManager.refreshContributor(addr1.address)).to.not.be.reverted;
+        });
+    });
 });
