@@ -25,15 +25,27 @@
 // when absent.  `TraceLayer` then opens a tracing span for each request that
 // includes the correlation ID, making it trivial to grep logs for a single
 // user's flow even when requests are interleaved.
+//
+// ## CORS allow-list
+//
+// The CORS layer is built from an explicit, configured origin allow-list
+// (`CORS_ALLOWED_ORIGINS`) rather than permitting `*`/`Any` — an
+// unrestricted origin would let any website read authenticated responses
+// from a browser holding a session with this API. An empty/unset value
+// results in a layer that permits no cross-origin browser requests at all
+// (same-origin and non-browser clients are unaffected), which is the safe
+// default until the allow-list is configured for the environment.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
+    http::{header::CONTENT_TYPE, HeaderValue, Method},
     routing::{get, post},
     Router,
 };
 use tower_http::{
+    cors::{AllowOrigin, CorsLayer},
     limit::RequestBodyLimitLayer,
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
     timeout::TimeoutLayer,
@@ -63,6 +75,11 @@ const REQUEST_ID_HEADER: &str = "x-request-id";
 
 /// Reward-token allowlist env var consumed by create-bounty flows.
 const ALLOWLISTED_REWARD_TOKENS_ENV: &str = "ALLOWLISTED_REWARD_TOKENS";
+
+/// Env var holding a comma-separated allow-list of origins permitted to make
+/// cross-origin requests, e.g.
+/// "https://app.mergemint.xyz,https://staging.mergemint.xyz".
+const CORS_ALLOWED_ORIGINS_ENV: &str = "CORS_ALLOWED_ORIGINS";
 
 #[tokio::main]
 async fn main() {
@@ -137,7 +154,11 @@ async fn main() {
         // Guard against slow-loris / oversized-body attacks (#476).
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         // Cancel requests that exceed the wall-clock budget (#476).
-        .layer(TimeoutLayer::new(REQUEST_TIMEOUT));
+        .layer(TimeoutLayer::new(REQUEST_TIMEOUT))
+        // Restrict cross-origin browser requests to the configured allow-list.
+        .layer(build_cors_layer(
+            &std::env::var(CORS_ALLOWED_ORIGINS_ENV).unwrap_or_default(),
+        ));
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080")
         .await
@@ -160,8 +181,42 @@ fn warn_if_reward_token_allowlist_empty() {
     }
 }
 
+/// Build the CORS layer from an explicit, comma-separated origin allow-list
+/// string (see `CORS_ALLOWED_ORIGINS_ENV`). Kept separate from the env var
+/// lookup so it's trivially testable with a fixed input.
+fn build_cors_layer(allowed_origins: &str) -> CorsLayer {
+    let origins: Vec<HeaderValue> = allowed_origins
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|origin| match origin.parse::<HeaderValue>() {
+            Ok(value) => Some(value),
+            Err(_) => {
+                tracing::warn!(origin, "ignoring invalid CORS_ALLOWED_ORIGINS entry");
+                None
+            }
+        })
+        .collect();
+
+    if origins.is_empty() {
+        tracing::warn!(
+            "CORS_ALLOWED_ORIGINS is empty — no cross-origin browser requests will be permitted"
+        );
+    }
+
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([Method::GET, Method::POST])
+        .allow_headers([CONTENT_TYPE])
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::Service;
+
     #[test]
     fn empty_allowlist_detection_handles_unset_empty_and_commas() {
         fn is_empty(value: &str) -> bool {
@@ -172,5 +227,81 @@ mod tests {
         assert!(is_empty(" , , "));
         assert!(!is_empty("native"));
         assert!(!is_empty(" , native , "));
+    }
+
+    fn test_router(allowed_origins: &str) -> Router {
+        Router::new()
+            .route("/health", get(|| async { "ok" }))
+            .layer(build_cors_layer(allowed_origins))
+    }
+
+    /// A request from an origin that isn't on the allow-list must not
+    /// receive an `Access-Control-Allow-Origin` header — without it, a
+    /// browser refuses to expose the response to that origin's script.
+    #[tokio::test]
+    async fn disallowed_origin_does_not_receive_cors_allow_header() {
+        let mut app = test_router("https://app.mergemint.xyz");
+
+        let request = Request::builder()
+            .uri("/health")
+            .header("origin", "https://evil.example.com")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.call(request).await.unwrap();
+
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none(),
+            "a disallowed origin must not receive an Access-Control-Allow-Origin header"
+        );
+    }
+
+    /// A request from an allow-listed origin must receive a matching
+    /// `Access-Control-Allow-Origin` header.
+    #[tokio::test]
+    async fn allowed_origin_receives_cors_allow_header() {
+        let mut app = test_router("https://app.mergemint.xyz");
+
+        let request = Request::builder()
+            .uri("/health")
+            .header("origin", "https://app.mergemint.xyz")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.call(request).await.unwrap();
+
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .expect("allowed origin must receive the header"),
+            "https://app.mergemint.xyz"
+        );
+    }
+
+    /// An empty allow-list (nothing configured) must permit no cross-origin
+    /// requests at all — the safe default, never `*`.
+    #[tokio::test]
+    async fn empty_allow_list_grants_no_origin_access() {
+        let mut app = test_router("");
+
+        let request = Request::builder()
+            .uri("/health")
+            .header("origin", "https://app.mergemint.xyz")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.call(request).await.unwrap();
+
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none(),
+            "an empty CORS_ALLOWED_ORIGINS must not grant any origin access"
+        );
     }
 }
