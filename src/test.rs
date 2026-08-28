@@ -2014,3 +2014,112 @@ fn test_escrow_balance_invariant() {
         "after complete b3: contract balance must be zero"
     );
 }
+
+// ===========================================================================
+// Issue #655 — pin the storage read/write entry counts for create_bounty
+//
+// `create_bounty` had a storage-read-doubling bug fixed in issue #90. This
+// test pins the per-invocation ledger-entry write count and bounds the read
+// count so a change that reintroduces redundant storage access (or otherwise
+// inflates the storage footprint of a single create_bounty call) fails CI
+// instead of silently regressing on-chain cost.
+//
+// `Env` enables invocation metering by default, so
+// `env.cost_estimate().resources()` reports the resources metered for the
+// last top-level invocation — here, the create_bounty call.
+// ===========================================================================
+
+/// Ledger entries a single `create_bounty` call must write, one per distinct
+/// persistent key it stores:
+///   Bounty, BountyMeta, BountyCount, StatusCount(open),
+///   StatusIndexPage(open, 0), OpenBountiesCount, OpenBountiesPage(0),
+///   ContributorBounties(creator).
+/// Dropping below this means a required write was lost.
+const CREATE_BOUNTY_MIN_WRITE_ENTRIES: u32 = 8;
+
+/// Ceiling on write entries — headroom for host/token instance bumps only.
+/// Exceeding it means `create_bounty` grew its write footprint.
+const CREATE_BOUNTY_MAX_WRITE_ENTRIES: u32 = 12;
+
+/// Ceiling on distinct ledger entries read by one `create_bounty` call.
+/// The current footprint is single-digit; this leaves room for incidental
+/// host/token reads while still catching a gross regression such as the
+/// issue #90 read-doubling bug.
+const CREATE_BOUNTY_MAX_READ_ENTRIES: u32 = 32;
+
+fn measure_create_bounty(client: &MergeMintContractClient, env: &Env, token: &Address, tag: &str) {
+    client.create_bounty(
+        &Address::generate(env),
+        &Symbol::new(env, tag),
+        &String::from_str(env, "desc"),
+        &1000,
+        token,
+        &0,
+        &None,
+        &Vec::new(env),
+        &1,
+        &None,
+        &1,
+        &Vec::new(env),
+    );
+}
+
+#[test]
+fn test_create_bounty_storage_io_count_pinned() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    // Register the reward token before the measured calls so the last metered
+    // top-level invocation is always a create_bounty call.
+    let reward_token = create_token_and_mint(&env, &creator, &contract_id, 0);
+
+    // First create_bounty against empty indexes.
+    measure_create_bounty(&client, &env, &reward_token, "io_pin_1");
+    let first = env.cost_estimate().resources();
+
+    // Second create_bounty against now-populated indexes.
+    measure_create_bounty(&client, &env, &reward_token, "io_pin_2");
+    let second = env.cost_estimate().resources();
+
+    // Absolute footprint of a single create_bounty stays small: one write per
+    // distinct persistent key it stores, plus headroom for host/token entries.
+    assert!(
+        first.write_entries >= CREATE_BOUNTY_MIN_WRITE_ENTRIES
+            && first.write_entries <= CREATE_BOUNTY_MAX_WRITE_ENTRIES,
+        "create_bounty wrote {} ledger entries, outside the pinned range {}..={}; \
+         adjust the bounds only for a deliberate storage change. Full resources: {first:?}",
+        first.write_entries,
+        CREATE_BOUNTY_MIN_WRITE_ENTRIES,
+        CREATE_BOUNTY_MAX_WRITE_ENTRIES,
+    );
+    assert!(
+        first.memory_read_entries >= 1
+            && first.memory_read_entries <= CREATE_BOUNTY_MAX_READ_ENTRIES,
+        "create_bounty read {} ledger entries, above the pinned ceiling of {}. \
+         Full resources: {first:?}",
+        first.memory_read_entries,
+        CREATE_BOUNTY_MAX_READ_ENTRIES,
+    );
+
+    // Calibration-free regression guard for the issue #90 read-doubling class
+    // of bug: a second create_bounty touches the same set of distinct entries
+    // as the first (they merely hold values now), so its read/write footprint
+    // must not grow. A path that reads an entry twice, or scales storage
+    // access with the number of existing bounties, trips this.
+    assert!(
+        second.memory_read_entries <= first.memory_read_entries + 1,
+        "create_bounty read footprint grew from {} to {} on the second call — \
+         a storage read is being duplicated or scales with bounty count (see issue #90). \
+         first: {first:?}\nsecond: {second:?}",
+        first.memory_read_entries,
+        second.memory_read_entries,
+    );
+    assert!(
+        second.write_entries <= first.write_entries + 1,
+        "create_bounty write footprint grew from {} to {} on the second call. \
+         first: {first:?}\nsecond: {second:?}",
+        first.write_entries,
+        second.write_entries,
+    );
+}
