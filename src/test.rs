@@ -2014,3 +2014,48 @@ fn test_escrow_balance_invariant() {
         "after complete b3: contract balance must be zero"
     );
 }
+
+// ===========================================================================
+// Issue 751 — get_contributor_active_bounty with no active bounty
+// ===========================================================================
+
+/// A contributor with no active claim yields `None` from
+/// `get_contributor_active_bounty`, even when other bounties exist and are
+/// in progress. The contributor who did claim gets `Some(bounty_id)` back.
+#[test]
+fn test_get_contributor_active_bounty_no_active_bounty() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    // Empty contract: a fresh contributor has no active bounty.
+    assert!(client
+        .get_contributor_active_bounty(&contributor)
+        .is_none());
+
+    // With an open bounty and an in-progress bounty present, a contributor
+    // who never claimed anything still has no active bounty.
+    let _open_id = make_bounty(&client, &env, &creator, "no_active", None);
+
+    let claimer = Address::generate(&env);
+    let (in_progress_id, _token) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "no_active_claimed",
+        1000,
+        None,
+    );
+    client.claim_bounty(&claimer, &in_progress_id);
+
+    // Sanity: in-progress bounty exists and claimer is assigned to it.
+    assert!(client
+        .get_contributor_active_bounty(&claimer)
+        .is_some());
+
+    // The never-claimed contributor must still resolve to None.
+    assert!(client
+        .get_contributor_active_bounty(&contributor)
+        .is_none());
+}
