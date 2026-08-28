@@ -94,12 +94,26 @@ fn is_syntactically_valid_address(address: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::new_shared_db;
+    use crate::db::{acquire_db, new_shared_db, Bounty};
 
     fn test_state() -> Arc<AppState> {
         Arc::new(AppState {
             db: new_shared_db(),
         })
+    }
+
+    /// Seed `count` bounties into `state`'s store so a page can actually be
+    /// cut short by the limit clamp.
+    fn seed_bounties(state: &AppState, count: usize) {
+        let mut guard = acquire_db(&state.db);
+        for i in 0..count {
+            guard.bounties.push(Bounty {
+                id: i.to_string(),
+                creator: "carol".to_string(),
+                assignee: None,
+                created_at: Utc::now() + chrono::Duration::seconds(i as i64),
+            });
+        }
     }
 
     fn valid_address() -> String {
@@ -166,5 +180,51 @@ mod tests {
 
         assert!(page.bounties.is_empty());
         assert!(page.next_cursor.is_none());
+    }
+
+    /// An oversized `limit` query param must be clamped to `MAX_LIST_LIMIT`
+    /// before the store is queried, not passed through verbatim — otherwise
+    /// a caller could force an unbounded scan/sort over every bounty.
+    #[tokio::test]
+    async fn list_bounties_clamps_an_oversized_limit_to_the_max() {
+        let state = test_state();
+        seed_bounties(&state, MAX_LIST_LIMIT as usize + 50);
+
+        let Json(page) = list_bounties(
+            State(state),
+            Query(ListParams {
+                limit: Some(10_000),
+                cursor: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            page.bounties.len(),
+            MAX_LIST_LIMIT as usize,
+            "an oversized limit must be clamped to MAX_LIST_LIMIT"
+        );
+        assert!(
+            page.next_cursor.is_some(),
+            "a clamped page shorter than the full result set must carry a next_cursor"
+        );
+    }
+
+    /// A caller-supplied limit within bounds must be honored as-is.
+    #[tokio::test]
+    async fn list_bounties_honors_a_limit_within_bounds() {
+        let state = test_state();
+        seed_bounties(&state, 20);
+
+        let Json(page) = list_bounties(
+            State(state),
+            Query(ListParams {
+                limit: Some(5),
+                cursor: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(page.bounties.len(), 5);
     }
 }
