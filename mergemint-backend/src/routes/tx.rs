@@ -10,8 +10,10 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::db::{read_db, SharedDb};
+use crate::rate_limit::TokenBucketLimiter;
 
 // ---------------------------------------------------------------------------
 // Shared application state
@@ -19,7 +21,12 @@ use crate::db::{read_db, SharedDb};
 
 pub struct AppState {
     pub db: SharedDb,
+    pub self_claim_limiter: Arc<TokenBucketLimiter>,
 }
+
+/// Default self-claim rate limit: 5 relay submissions per claimant per minute.
+pub const SELF_CLAIM_RATE_LIMIT: u32 = 5;
+pub const SELF_CLAIM_RATE_WINDOW: Duration = Duration::from_secs(60);
 
 // ---------------------------------------------------------------------------
 // Error helpers
@@ -54,6 +61,14 @@ impl AppError {
             message: msg.into(),
         };
         (StatusCode::NOT_FOUND, Json(err))
+    }
+
+    pub fn too_many_requests(msg: impl Into<String>) -> (StatusCode, Json<AppError>) {
+        let err = AppError {
+            code: 429,
+            message: msg.into(),
+        };
+        (StatusCode::TOO_MANY_REQUESTS, Json(err))
     }
 
     /// Construct an internal server error.
@@ -129,7 +144,7 @@ pub struct ResolveDisputeResponse {
     pub xdr: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct SelfClaimRequest {
     pub bounty_id: String,
     pub claimant: String,
@@ -207,6 +222,12 @@ pub async fn self_claim(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SelfClaimRequest>,
 ) -> Result<Json<ResolveDisputeResponse>, (StatusCode, Json<AppError>)> {
+    if !state.self_claim_limiter.try_acquire(&req.claimant) {
+        return Err(AppError::too_many_requests(
+            "self-claim rate limit exceeded for this claimant address",
+        ));
+    }
+
     let bounty = {
         let db = read_db(&state.db);
         let raw = db
@@ -248,8 +269,11 @@ pub async fn self_claim(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rate_limit::TokenBucketLimiter;
     use axum::body::to_bytes;
+    use axum::extract::State;
     use axum::response::IntoResponse;
+    use std::time::Duration;
 
     /// Helper: convert a Response body to a String.
     async fn body_string(response: axum::response::Response) -> String {
@@ -326,6 +350,61 @@ mod tests {
         assert!(
             body.contains("missing field: bounty_id"),
             "400 body must contain the original message; got: {body}"
+        );
+    }
+
+    fn expired_bounty_json(id: &str, creator: &str) -> String {
+        serde_json::to_string(&Bounty {
+            id: id.to_string(),
+            creator: creator.to_string(),
+            amount: 100,
+            expires_at: 1,
+        })
+        .unwrap()
+    }
+
+    fn test_state_with_limit(max_tokens: u32) -> Arc<AppState> {
+        Arc::new(AppState {
+            db: crate::db::new_shared_db(),
+            self_claim_limiter: Arc::new(TokenBucketLimiter::new(
+                max_tokens,
+                Duration::from_secs(60),
+            )),
+        })
+    }
+
+    /// Rapid self-claim calls from the same address must be rejected after the limit.
+    #[tokio::test]
+    async fn self_claim_rate_limits_repeated_claimant() {
+        let state = test_state_with_limit(2);
+        {
+            let mut db = state.db.write().unwrap();
+            db.records.insert(
+                "bounty-1".to_string(),
+                expired_bounty_json("bounty-1", "creator-a"),
+            );
+        }
+
+        let req = SelfClaimRequest {
+            bounty_id: "bounty-1".to_string(),
+            claimant: "claimant-a".to_string(),
+        };
+
+        assert!(self_claim(State(Arc::clone(&state)), Json(req.clone()))
+            .await
+            .is_ok());
+        assert!(self_claim(State(Arc::clone(&state)), Json(req.clone()))
+            .await
+            .is_ok());
+
+        let err = self_claim(State(state), Json(req))
+            .await
+            .expect_err("third call must be rate limited");
+        assert_eq!(err.0, StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            err.1.message.contains("rate limit exceeded"),
+            "unexpected message: {}",
+            err.1.message
         );
     }
 }

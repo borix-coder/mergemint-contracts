@@ -40,10 +40,14 @@ use tracing::Level;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 mod db;
+mod rate_limit;
 mod routes;
 
 use db::new_shared_db;
-use routes::tx::{resolve_dispute, self_claim, AppState};
+use rate_limit::TokenBucketLimiter;
+use routes::tx::{
+    resolve_dispute, self_claim, AppState, SELF_CLAIM_RATE_LIMIT, SELF_CLAIM_RATE_WINDOW,
+};
 
 /// Maximum allowed request body size (1 MiB).
 const MAX_BODY_BYTES: usize = 1024 * 1024;
@@ -84,7 +88,13 @@ async fn main() {
     warn_if_reward_token_allowlist_empty();
 
     let shared_db = new_shared_db();
-    let state = Arc::new(AppState { db: shared_db });
+    let state = Arc::new(AppState {
+        db: shared_db,
+        self_claim_limiter: Arc::new(TokenBucketLimiter::new(
+            SELF_CLAIM_RATE_LIMIT,
+            SELF_CLAIM_RATE_WINDOW,
+        )),
+    });
 
     let app = Router::new()
         .route("/tx/resolve-dispute", post(resolve_dispute))
