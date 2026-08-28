@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 
 use crate::contract::MergeMintContract;
+use crate::types::DataKey;
 use crate::MergeMintContractClient;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger as _},
+    testutils::{storage::Persistent as _, Address as _, Ledger as _},
     token::StellarAssetClient,
     Address, Env, String, Symbol, Vec,
 };
@@ -2012,5 +2013,42 @@ fn test_escrow_balance_invariant() {
         token_admin.balance(&contract_id),
         expected_balance(0, 0),
         "after complete b3: contract balance must be zero"
+    );
+}
+
+/// Regression: long-lived Contributor entries are bumped on read and remain
+/// readable after the ledger advances past the storage TTL window (issue #651).
+#[test]
+fn test_contributor_storage_ttl_bump_survives_ledger_advance() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let bounty_id = make_bounty(&client, &env, &creator, "ttl_reg", None);
+    client.claim_bounty(&contributor, &bounty_id);
+
+    let contrib_key = DataKey::Contributor(contributor.clone());
+    let ttl_at_store = env.as_contract(&contract_id, || {
+        env.storage().persistent().get_ttl(&contrib_key)
+    });
+    assert!(
+        ttl_at_store > 0,
+        "contributor entry should have persistent TTL after store"
+    );
+
+    let past_ttl = env.ledger().sequence() + ttl_at_store + 1;
+    env.ledger().set_sequence_number(past_ttl);
+
+    let contrib = client
+        .get_contributor(&contributor)
+        .expect("contributor must remain readable after TTL window via bump-on-read");
+    assert_eq!(contrib.active_claims, 1);
+
+    let ttl_after_read = env.as_contract(&contract_id, || {
+        env.storage().persistent().get_ttl(&contrib_key)
+    });
+    assert!(
+        ttl_after_read >= ttl_at_store / 2,
+        "extend_ttl on read should restore a healthy TTL (got {ttl_after_read}, was {ttl_at_store})"
     );
 }
