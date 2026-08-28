@@ -2,25 +2,31 @@
 
 Performance notes for the MergeMint contract. Instruction counts are measured in two ways:
 
-1. **Unit tests** — `env.budget().cpu_instruction_count()` in `src/test.rs` (see `benchmark_*` tests) measures CPU instructions consumed in the Soroban simulator during `cargo test`.
+1. **Unit tests** — `env.cost_estimate().budget().cpu_instruction_cost()` in `src/test.rs` (see `benchmark_*` tests) measures CPU instructions consumed in the Soroban simulator during `cargo test`.
 2. **On-chain simulation** — `simulateTransaction` RPC call returns `cost.cpuInsns` for real network measurements.
 
 ---
 
 ## CPU Instruction Baselines (Issue #289)
 
-Baseline measurements captured by the `benchmark_*` tests in `src/test.rs` using `env.budget().cpu_instruction_count()`. Run `cargo test benchmark` to reproduce.
+Baseline measurements captured by the `benchmark_*` tests in `src/test.rs` using `env.cost_estimate().budget().cpu_instruction_cost()`. Reproduce with:
+
+```bash
+cargo test benchmark --lib -- --nocapture
+```
+
+Captured on `main` after the Soroban SDK 27.0.6 bump (2026-08-28):
 
 | Function | CPU Instructions | Soft Limit |
 |----------|-----------------|------------|
-| `create_bounty` | — | 1,000,000 |
-| `claim_bounty` | — | 1,000,000 |
-| `complete_bounty` | — | 1,000,000 |
-| `get_bounty` | — | 500,000 |
-| `get_contributor` | — | 500,000 |
-| `get_bounty_count` | — | 500,000 |
+| `create_bounty` | 533,419 | 1,000,000 |
+| `claim_bounty` | 619,507 | 1,000,000 |
+| `complete_bounty` | 782,959 | 1,000,000 |
+| `get_bounty` | 90,368 | 500,000 |
+| `get_contributor` | 68,465 | 500,000 |
+| `get_bounty_count` | 42,974 | 500,000 |
 
-> Values are populated by running `cargo test benchmark -- --nocapture` and reading the printed output.
+> Soft limits are guardrails in the benchmark tests; all current measurements are well below their limits. Re-run `cargo test benchmark --lib -- --nocapture` after contract changes that touch these entrypoints.
 
 ---
 
