@@ -18,6 +18,26 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+// ---------------------------------------------------------------------------
+// Migrations
+// ---------------------------------------------------------------------------
+//
+// `DbStore` above is the in-memory stand-in used today; `migrations/` holds
+// the SQL that applies to the real Postgres-backed store production
+// deployments run instead (see the module doc comment). It is not yet
+// wired to a live connection pool or `sqlx::migrate!()` -- there is no
+// Postgres integration in this crate yet -- but it is the source of truth
+// for schema/index decisions so they aren't lost when that pool lands.
+//
+// `migrations/0001_add_bounties_indexes.sql` indexes `bounties.assignee`
+// and `bounties.status`, the columns the indexer's writes are later
+// filtered on by `list_bounties_by_assignee` and status-based listing
+// queries. `BOUNTIES_INDEX_MIGRATION` below pins that file's content so an
+// edit that silently drops one of the two indexes fails `cargo test`
+// instead of only surfacing as a slow query in production.
+#[cfg(test)]
+const BOUNTIES_INDEX_MIGRATION: &str = include_str!("../migrations/0001_add_bounties_indexes.sql");
+
 /// Lightweight in-memory store used during development / integration tests.
 /// Production deployments replace this with a real database pool.
 #[derive(Debug, Default)]
@@ -145,6 +165,22 @@ mod tests {
 
         assert!(read_a.records.is_empty());
         assert!(read_b.records.is_empty());
+    }
+
+    #[test]
+    fn test_bounties_index_migration_covers_assignee_and_status() {
+        let migration = BOUNTIES_INDEX_MIGRATION.to_lowercase();
+
+        assert!(
+            migration
+                .contains("create index if not exists idx_bounties_assignee on bounties (assignee)"),
+            "migration must index bounties.assignee (filtered by list_bounties_by_assignee); got:\n{migration}"
+        );
+        assert!(
+            migration
+                .contains("create index if not exists idx_bounties_status on bounties (status)"),
+            "migration must index bounties.status (filtered by status-based listing queries); got:\n{migration}"
+        );
     }
 
     #[test]
