@@ -1,5 +1,33 @@
 # Contract Architecture
 
+## Source Module Layout
+
+The on-chain contract lives under `src/contract/` and is split by responsibility:
+
+```
+src/
+├── lib.rs              # crate root; re-exports MergeMintContract
+├── contract/
+│   ├── mod.rs          # #[contract] MergeMintContract + include! wiring
+│   ├── mutations.rs    # state-changing entrypoints (create/claim/complete/cancel/…)
+│   ├── queries.rs      # read-only getters (get_bounty, paging, status indexes, …)
+│   └── queries_test.rs # unit tests colocated with query helpers
+├── storage.rs          # DataKey layout, TTL extension, persistent/temporary accessors
+├── types.rs            # Bounty, Contributor, Milestone, BountyMeta structs
+├── events.rs           # on-chain event emission helpers
+├── errors.rs           # ContractError + fail! macros
+└── scval.rs            # Soroban ScVal conversion helpers
+```
+
+`mod.rs` owns the `#[contractimpl]` block and pulls in the two halves via `include!`:
+
+| File | Responsibility | Entrypoints |
+|------|----------------|-------------|
+| `mutations.rs` | Auth guards, state transitions, token transfers, events | `create_bounty`, `claim_bounty`, `complete_bounty`, `complete_milestone`, `approve_completion`, `raise_dispute`, `resolve_dispute`, `update_contributor_metadata`, `cancel_bounty`, `expire_bounty` |
+| `queries.rs` | Read paths with no ledger writes | `get_bounty`, `get_bounties`, `get_bounty_count`, `get_bounties_by_status`, `get_status_count`, `get_open_bounties*`, `get_bounties_by_tag`, `get_contributor`, `get_contributor_active_bounty`, `get_bounties_by_creator`, `get_bounty_metas` |
+
+Off-chain services (`mergemint-backend/`) call into the contract through the generated SDK; they are not part of the Soroban module tree above.
+
 ## Data Flow
 
 ```
