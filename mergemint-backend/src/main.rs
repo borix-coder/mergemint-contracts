@@ -29,7 +29,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::{routing::post, Router};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 use tower_http::{
     limit::RequestBodyLimitLayer,
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
@@ -43,6 +46,7 @@ mod db;
 mod routes;
 
 use db::new_shared_db;
+use routes::bounties::{list_bounties, list_bounties_by_assignee};
 use routes::tx::{resolve_dispute, self_claim, AppState};
 
 /// Maximum allowed request body size (1 MiB).
@@ -89,6 +93,11 @@ async fn main() {
     let app = Router::new()
         .route("/tx/resolve-dispute", post(resolve_dispute))
         .route("/tx/self-claim", post(self_claim))
+        .route("/bounties", get(list_bounties))
+        .route(
+            "/bounties/assignee/:address",
+            get(list_bounties_by_assignee),
+        )
         .with_state(state)
         // ── Correlation-ID middleware stack (#486) ──────────────────────────
         //

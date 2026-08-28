@@ -15,6 +15,8 @@
 // data truly is corrupt the next business-logic validation will catch it and
 // return an error to the client rather than crashing the process.
 
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -25,6 +27,96 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 #[derive(Debug, Default)]
 pub struct DbStore {
     pub records: HashMap<String, String>,
+    /// Bounty listing rows backing `list_bounties_by_creator` /
+    /// `list_bounties_by_assignee`. Kept separate from `records` (which
+    /// stores the flat id -> JSON blobs used by the dispute/self-claim
+    /// flows) since it has its own queryable shape.
+    pub bounties: Vec<Bounty>,
+}
+
+// ---------------------------------------------------------------------------
+// Bounty listing
+// ---------------------------------------------------------------------------
+
+/// A bounty row as exposed by the listing endpoints (`list_bounties`,
+/// `list_bounties_by_assignee`). Distinct from `routes::tx::Bounty`, which
+/// models only the fields needed to build payout XDR for the dispute /
+/// self-claim flows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Bounty {
+    pub id: String,
+    pub creator: String,
+    pub assignee: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// One page of a cursor-paginated bounty listing.
+#[derive(Debug, Serialize)]
+pub struct BountyPage {
+    pub bounties: Vec<Bounty>,
+    pub next_cursor: Option<String>,
+}
+
+/// List bounties created by `creator`, newest-first, paginated by `cursor`.
+/// An empty `creator` matches every bounty — used by the unfiltered
+/// `GET /bounties` listing.
+///
+/// `limit` is trusted to already be clamped by the caller (see the
+/// max-limit clamp in `routes::bounties::list_bounties`); this function
+/// does not re-validate it.
+pub fn list_bounties_by_creator(
+    db: &SharedDb,
+    creator: &str,
+    limit: i64,
+    cursor: Option<DateTime<Utc>>,
+) -> BountyPage {
+    let guard = read_db(db);
+    let mut matches: Vec<Bounty> = guard
+        .bounties
+        .iter()
+        .filter(|b| creator.is_empty() || b.creator == creator)
+        .filter(|b| cursor.is_none_or(|c| b.created_at < c))
+        .cloned()
+        .collect();
+    matches.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    paginate(matches, limit)
+}
+
+/// List bounties where `assignee` matches the recorded assignee, newest-first,
+/// paginated by `cursor`.
+pub fn list_bounties_by_assignee(
+    db: &SharedDb,
+    assignee: &str,
+    limit: i64,
+    cursor: Option<DateTime<Utc>>,
+) -> BountyPage {
+    let guard = read_db(db);
+    let mut matches: Vec<Bounty> = guard
+        .bounties
+        .iter()
+        .filter(|b| b.assignee.as_deref() == Some(assignee))
+        .filter(|b| cursor.is_none_or(|c| b.created_at < c))
+        .cloned()
+        .collect();
+    matches.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    paginate(matches, limit)
+}
+
+/// Trim `bounties` to at most `limit` entries, returning the next cursor
+/// (the `created_at` of the last row) when more results exist beyond it.
+fn paginate(mut bounties: Vec<Bounty>, limit: i64) -> BountyPage {
+    let limit = usize::try_from(limit).unwrap_or(0);
+    let has_more = bounties.len() > limit;
+    bounties.truncate(limit);
+    let next_cursor = if has_more {
+        bounties.last().map(|b| b.created_at.to_rfc3339())
+    } else {
+        None
+    };
+    BountyPage {
+        bounties,
+        next_cursor,
+    }
 }
 
 /// Shared, thread-safe handle to the database store.
@@ -253,6 +345,89 @@ mod tests {
         assert!(
             pool.acquire().await.is_ok(),
             "connection should be available again once the held one is dropped"
+        );
+    }
+
+    // ── Bounty listing ───────────────────────────────────────────────────
+
+    fn seed_bounty(
+        db: &SharedDb,
+        id: &str,
+        creator: &str,
+        assignee: Option<&str>,
+        offset_secs: i64,
+    ) {
+        let mut guard = acquire_db(db);
+        guard.bounties.push(Bounty {
+            id: id.to_string(),
+            creator: creator.to_string(),
+            assignee: assignee.map(str::to_string),
+            created_at: Utc::now() + chrono::Duration::seconds(offset_secs),
+        });
+    }
+
+    #[test]
+    fn test_list_bounties_by_creator_filters_and_orders_newest_first() {
+        let db = new_shared_db();
+        seed_bounty(&db, "1", "alice", None, 0);
+        seed_bounty(&db, "2", "bob", None, 1);
+        seed_bounty(&db, "3", "alice", None, 2);
+
+        let page = list_bounties_by_creator(&db, "alice", 10, None);
+
+        assert_eq!(page.bounties.len(), 2);
+        assert_eq!(page.bounties[0].id, "3", "newest match must come first");
+        assert_eq!(page.bounties[1].id, "1");
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[test]
+    fn test_list_bounties_by_creator_empty_creator_matches_all() {
+        let db = new_shared_db();
+        seed_bounty(&db, "1", "alice", None, 0);
+        seed_bounty(&db, "2", "bob", None, 1);
+
+        let page = list_bounties_by_creator(&db, "", 10, None);
+
+        assert_eq!(page.bounties.len(), 2);
+    }
+
+    #[test]
+    fn test_list_bounties_by_assignee_returns_empty_page_for_unknown_assignee() {
+        let db = new_shared_db();
+        seed_bounty(&db, "1", "alice", Some("carol"), 0);
+
+        let page = list_bounties_by_assignee(&db, "dave", 10, None);
+
+        assert!(page.bounties.is_empty());
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[test]
+    fn test_list_bounties_by_assignee_matches_recorded_assignee() {
+        let db = new_shared_db();
+        seed_bounty(&db, "1", "alice", Some("carol"), 0);
+        seed_bounty(&db, "2", "bob", Some("dave"), 1);
+
+        let page = list_bounties_by_assignee(&db, "carol", 10, None);
+
+        assert_eq!(page.bounties.len(), 1);
+        assert_eq!(page.bounties[0].id, "1");
+    }
+
+    #[test]
+    fn test_list_bounties_pagination_sets_next_cursor_when_more_results_exist() {
+        let db = new_shared_db();
+        seed_bounty(&db, "1", "alice", None, 0);
+        seed_bounty(&db, "2", "alice", None, 1);
+        seed_bounty(&db, "3", "alice", None, 2);
+
+        let page = list_bounties_by_creator(&db, "alice", 2, None);
+
+        assert_eq!(page.bounties.len(), 2);
+        assert!(
+            page.next_cursor.is_some(),
+            "a page cut short by the limit must carry a next_cursor"
         );
     }
 }
