@@ -272,6 +272,42 @@ fn test_get_bounties_by_creator_unknown_address_empty() {
     );
 }
 
+/// `get_bounties_by_creator` clamps `limit` to 50 (MAX_LIMIT) per `paginate`.
+#[test]
+fn test_get_bounties_by_creator_limit_capped_at_max() {
+    const CREATOR_BOUNTY_TAGS: [&str; 55] = [
+        "c00", "c01", "c02", "c03", "c04", "c05", "c06", "c07", "c08", "c09", "c10", "c11", "c12",
+        "c13", "c14", "c15", "c16", "c17", "c18", "c19", "c20", "c21", "c22", "c23", "c24", "c25",
+        "c26", "c27", "c28", "c29", "c30", "c31", "c32", "c33", "c34", "c35", "c36", "c37", "c38",
+        "c39", "c40", "c41", "c42", "c43", "c44", "c45", "c46", "c47", "c48", "c49", "c50", "c51",
+        "c52", "c53", "c54",
+    ];
+
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    for tag in CREATOR_BOUNTY_TAGS {
+        make_bounty(&client, &env, &creator, tag, None);
+    }
+
+    let (page, next) = client.get_bounties_by_creator(&creator, &None, &1000);
+    assert_eq!(
+        page.len(),
+        50,
+        "limit above cap must return at most 50 items"
+    );
+    assert_eq!(
+        next,
+        Some(50),
+        "next_cursor should point past the capped page"
+    );
+
+    let (page2, next2) = client.get_bounties_by_creator(&creator, &Some(50), &1000);
+    assert_eq!(page2.len(), 5, "remaining items after first capped page");
+    assert_eq!(next2, None, "list exhausted after second page");
+}
+
 // ===========================================================================
 // Issue 3 — dispute guard in complete_bounty
 // ===========================================================================
