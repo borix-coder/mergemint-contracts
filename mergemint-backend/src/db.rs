@@ -17,6 +17,8 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// Lightweight in-memory store used during development / integration tests.
 /// Production deployments replace this with a real database pool.
@@ -50,6 +52,109 @@ pub fn acquire_db(db: &SharedDb) -> std::sync::RwLockWriteGuard<'_, DbStore> {
 /// Acquire the database read lock, recovering gracefully from lock poison.
 pub fn read_db(db: &SharedDb) -> std::sync::RwLockReadGuard<'_, DbStore> {
     db.read().unwrap_or_else(|e| e.into_inner())
+}
+
+// ---------------------------------------------------------------------------
+// Connection pool
+// ---------------------------------------------------------------------------
+//
+// ## Bounded-wait pool exhaustion
+//
+// The store above is guarded by a single `RwLock`, so it has no notion of a
+// fixed number of "connections" the way a real `sqlx::PgPool` does. `DbPool`
+// adds that capacity bound ahead of the real Postgres pool swap-in: callers
+// check out a `PooledConnection` from a fixed-size semaphore, and once the
+// pool is saturated, `acquire` waits at most `POOL_ACQUIRE_TIMEOUT` before
+// returning `PoolExhausted` — a clear, fast error — rather than blocking the
+// caller indefinitely.
+
+/// Default number of concurrent connections a [`DbPool`] hands out before
+/// callers must wait for one to be released, mirroring a real DB pool's
+/// `max_connections` setting.
+#[allow(dead_code)]
+pub const DEFAULT_POOL_SIZE: usize = 10;
+
+/// Upper bound on how long [`DbPool::acquire`] waits for a free connection.
+/// Bounding the wait is what turns pool exhaustion into a fast, explicit
+/// error instead of a request that hangs indefinitely.
+#[allow(dead_code)]
+pub const POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Returned by [`DbPool::acquire`] when no connection became available
+/// within `POOL_ACQUIRE_TIMEOUT`.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct PoolExhausted;
+
+impl std::fmt::Display for PoolExhausted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "connection pool exhausted: no connection became available within the timeout"
+        )
+    }
+}
+
+impl std::error::Error for PoolExhausted {}
+
+/// A capacity-bounded pool over [`SharedDb`].
+#[derive(Clone)]
+#[allow(dead_code)]
+pub struct DbPool {
+    db: SharedDb,
+    permits: Arc<Semaphore>,
+}
+
+#[allow(dead_code)]
+impl DbPool {
+    /// Build a pool with the default capacity.
+    pub fn new(db: SharedDb) -> Self {
+        Self::with_capacity(db, DEFAULT_POOL_SIZE)
+    }
+
+    /// Build a pool with an explicit capacity — used by tests to saturate a
+    /// small pool without checking out hundreds of connections.
+    pub fn with_capacity(db: SharedDb, capacity: usize) -> Self {
+        Self {
+            db,
+            permits: Arc::new(Semaphore::new(capacity)),
+        }
+    }
+
+    /// Check out a connection, waiting up to `POOL_ACQUIRE_TIMEOUT` for one
+    /// to free up. Returns `PoolExhausted` rather than hanging if the pool
+    /// stays saturated for the whole timeout window.
+    pub async fn acquire(&self) -> Result<PooledConnection, PoolExhausted> {
+        let permit =
+            tokio::time::timeout(POOL_ACQUIRE_TIMEOUT, self.permits.clone().acquire_owned())
+                .await
+                .map_err(|_elapsed| PoolExhausted)?
+                .expect("pool semaphore is never closed");
+
+        Ok(PooledConnection {
+            db: self.db.clone(),
+            _permit: permit,
+        })
+    }
+}
+
+/// A checked-out pool connection. Dropping it releases the permit back to
+/// the pool.
+#[allow(dead_code)]
+pub struct PooledConnection {
+    db: SharedDb,
+    _permit: OwnedSemaphorePermit,
+}
+
+#[allow(dead_code)]
+impl PooledConnection {
+    pub fn read(&self) -> std::sync::RwLockReadGuard<'_, DbStore> {
+        read_db(&self.db)
+    }
+
+    pub fn write(&self) -> std::sync::RwLockWriteGuard<'_, DbStore> {
+        acquire_db(&self.db)
+    }
 }
 
 #[cfg(test)]
@@ -93,5 +198,61 @@ mod tests {
 
         assert!(read_a.records.is_empty());
         assert!(read_b.records.is_empty());
+    }
+
+    // ── Connection pool exhaustion ─────────────────────────────────────────
+
+    /// Saturating the pool must yield a bounded-time error on the next
+    /// acquire, never an indefinite hang.
+    #[tokio::test]
+    async fn test_pool_exhaustion_returns_bounded_time_error_not_hang() {
+        let db = new_shared_db();
+        let pool = DbPool::with_capacity(db, 2);
+
+        let _held_1 = pool
+            .acquire()
+            .await
+            .expect("first connection should succeed");
+        let _held_2 = pool
+            .acquire()
+            .await
+            .expect("second connection should succeed");
+
+        let start = std::time::Instant::now();
+        let result = pool.acquire().await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.is_err(),
+            "acquiring beyond pool capacity must return an error, not succeed"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "pool exhaustion must fail within a bounded time instead of hanging; took {elapsed:?}"
+        );
+    }
+
+    /// Once a held connection is dropped, its permit must be returned to the
+    /// pool so the next acquire succeeds.
+    #[tokio::test]
+    async fn test_pool_connection_is_released_back_after_drop() {
+        let db = new_shared_db();
+        let pool = DbPool::with_capacity(db, 1);
+
+        {
+            let _held = pool
+                .acquire()
+                .await
+                .expect("first connection should succeed");
+            assert!(
+                pool.acquire().await.is_err(),
+                "pool of capacity 1 must be exhausted while the only connection is held"
+            );
+        }
+
+        assert!(
+            pool.acquire().await.is_ok(),
+            "connection should be available again once the held one is dropped"
+        );
     }
 }
