@@ -1223,6 +1223,26 @@ fn test_status_count_matches_index_length() {
     );
 }
 
+/// get_status_count returns 0 (not an error) for a Symbol that is not a
+/// contract-registered status. Storage uses per-status keys; missing keys
+/// default to 0 via `unwrap_or(0)` in `storage::get_status_count`.
+#[test]
+fn test_status_count_unknown_symbol_returns_zero() {
+    let (env, _creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    assert_eq!(
+        client.get_status_count(&Symbol::new(&env, "nonexistent")),
+        0
+    );
+    assert_eq!(
+        client.get_status_count(&Symbol::new(&env, "bogus_status")),
+        0
+    );
+    assert_eq!(client.get_status_count(&Symbol::new(&env, "active")), 0);
+}
+
 /// The assignee calling complete_bounty as their own verifier must panic.
 #[test]
 #[should_panic(expected = "verifier cannot be the assignee")]
