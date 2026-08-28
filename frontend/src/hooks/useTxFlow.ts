@@ -7,7 +7,16 @@ interface TxFlowState {
   result: SubmitResult | null;
 }
 
-export function useTxFlow(network: NetworkName) {
+export interface UseTxFlowResult {
+  pending: boolean;
+  error: string | null;
+  result: SubmitResult | null;
+  run: (
+    submit: () => Promise<{ hash: string; ledger?: number }>,
+  ) => Promise<SubmitResult>;
+}
+
+export function useTxFlow(network: NetworkName): UseTxFlowResult {
   const [state, setState] = useState<TxFlowState>({
     pending: false,
     error: null,
