@@ -2123,3 +2123,133 @@ fn test_create_bounty_storage_io_count_pinned() {
         second.write_entries,
     );
 }
+
+// ===========================================================================
+// Issue #658 — BountyMeta stays in sync with Bounty across every mutation
+//
+// `get_bounty_metas` reads a separate `BountyMeta` record (title +
+// description) written once by `create_bounty`. No mutation entrypoint
+// changes a bounty's title or description, so the invariant every mutation
+// must preserve is: after the mutation, `get_bounty_metas([id])` still
+// returns the original title and description, and the record is still
+// present.
+//
+// This test drives bounties through each mutation entrypoint that writes a
+// `Bounty` and asserts the invariant after every step. A future mutation
+// that rewrites a bounty through a path which drops or desyncs its
+// `BountyMeta` will fail here.
+// ===========================================================================
+
+/// Assert the `BountyMeta` for `id` still holds exactly the title and
+/// description written at creation.
+fn assert_meta_in_sync(
+    client: &MergeMintContractClient,
+    env: &Env,
+    id: &crate::types::BountyId,
+    expected_title: &str,
+    expected_description: &str,
+) {
+    let metas = client.get_bounty_metas(&Vec::from_array(env, [id.clone()]));
+    let meta = metas
+        .get(0)
+        .unwrap()
+        .expect("BountyMeta must still exist after a Bounty mutation");
+    assert_eq!(
+        meta.title,
+        Symbol::new(env, expected_title),
+        "BountyMeta.title drifted from the Bounty it describes"
+    );
+    assert_eq!(
+        meta.description,
+        String::from_str(env, expected_description),
+        "BountyMeta.description drifted from the Bounty it describes"
+    );
+}
+
+#[test]
+fn test_bounty_meta_stays_synced_across_mutations() {
+    let (env, creator, contributor, verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    // claim_bounty -> raise_dispute -> resolve_dispute("cancel")
+    let (bounty_a, _token_a) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "meta_a", 1000, None);
+    assert_meta_in_sync(&client, &env, &bounty_a, "meta_a", "desc");
+
+    client.claim_bounty(&contributor, &bounty_a);
+    assert_meta_in_sync(&client, &env, &bounty_a, "meta_a", "desc");
+
+    client.raise_dispute(&creator, &bounty_a);
+    assert_meta_in_sync(&client, &env, &bounty_a, "meta_a", "desc");
+
+    client.resolve_dispute(&creator, &bounty_a, &Symbol::new(&env, "cancel"));
+    assert_meta_in_sync(&client, &env, &bounty_a, "meta_a", "desc");
+
+    // claim_bounty -> complete_bounty
+    let (bounty_b, _token_b) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "meta_b", 1000, None);
+    let contributor_b = Address::generate(&env);
+    client.claim_bounty(&contributor_b, &bounty_b);
+    assert_meta_in_sync(&client, &env, &bounty_b, "meta_b", "desc");
+    client.complete_bounty(&verifier, &bounty_b);
+    assert_meta_in_sync(&client, &env, &bounty_b, "meta_b", "desc");
+
+    // cancel_bounty
+    let (bounty_c, _token_c) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "meta_c", 1000, None);
+    client.cancel_bounty(&creator, &bounty_c);
+    assert_meta_in_sync(&client, &env, &bounty_c, "meta_c", "desc");
+
+    // expire_bounty
+    let (bounty_d, _token_d) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "meta_d",
+        1000,
+        Some(10),
+    );
+    env.ledger().set_sequence_number(100);
+    client.expire_bounty(&Address::generate(&env), &bounty_d);
+    assert_meta_in_sync(&client, &env, &bounty_d, "meta_d", "desc");
+
+    // complete_milestone
+    let milestone_token = create_token_and_mint(&env, &creator, &contract_id, 1000);
+    let mut milestones: Vec<crate::types::Milestone> = Vec::new(&env);
+    milestones.push_back(crate::types::Milestone {
+        description: Symbol::new(&env, "m0"),
+        reward: 1000,
+        completed: false,
+    });
+    let bounty_e = client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "meta_e"),
+        &String::from_str(&env, "desc"),
+        &1000,
+        &milestone_token,
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &milestones,
+    );
+    let contributor_e = Address::generate(&env);
+    client.claim_bounty(&contributor_e, &bounty_e);
+    assert_meta_in_sync(&client, &env, &bounty_e, "meta_e", "desc");
+    client.complete_milestone(&verifier, &bounty_e, &0u32);
+    assert_meta_in_sync(&client, &env, &bounty_e, "meta_e", "desc");
+
+    // approve_completion (multi-sig quorum path)
+    let (bounty_f, _token_f, v1, v2, _v3) =
+        make_multisig_bounty(&client, &env, &creator, &contract_id, 1000, 2);
+    let contributor_f = Address::generate(&env);
+    client.claim_bounty(&contributor_f, &bounty_f);
+    client.approve_completion(&v1, &bounty_f);
+    assert_meta_in_sync(&client, &env, &bounty_f, "msig", "multi-sig bounty");
+    client.approve_completion(&v2, &bounty_f);
+    assert_meta_in_sync(&client, &env, &bounty_f, "msig", "multi-sig bounty");
+}
