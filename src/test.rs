@@ -2014,3 +2014,147 @@ fn test_escrow_balance_invariant() {
         "after complete b3: contract balance must be zero"
     );
 }
+
+// ===========================================================================
+// Benchmarks — CPU instruction baselines (Issues #289, #752)
+// ===========================================================================
+
+#[cfg(test)]
+extern crate std;
+
+const BENCH_SOFT_LIMIT_MUTATION: u64 = 1_000_000;
+const BENCH_SOFT_LIMIT_QUERY: u64 = 500_000;
+
+fn measure_cpu<F: FnOnce()>(env: &Env, label: &str, soft_limit: u64, f: F) -> u64 {
+    env.cost_estimate().budget().reset_tracker();
+    f();
+    let cpu = env.cost_estimate().budget().cpu_instruction_cost();
+    std::println!("{label}: {cpu} CPU instructions");
+    assert!(
+        cpu < soft_limit,
+        "{label} exceeded soft limit ({cpu} >= {soft_limit})"
+    );
+    cpu
+}
+
+#[test]
+fn benchmark_create_bounty() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let reward_token = create_token_and_mint(&env, &creator, &contract_id, 0);
+
+    measure_cpu(
+        &env,
+        "benchmark_create_bounty",
+        BENCH_SOFT_LIMIT_MUTATION,
+        || {
+            let _ = client.create_bounty(
+                &creator,
+                &Symbol::new(&env, "bench_create"),
+                &String::from_str(&env, "desc"),
+                &1000,
+                &reward_token,
+                &0,
+                &None,
+                &Vec::new(&env),
+                &1,
+                &None,
+                &1,
+                &Vec::new(&env),
+            );
+        },
+    );
+}
+
+#[test]
+fn benchmark_claim_bounty() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let bounty_id = make_bounty(&client, &env, &creator, "bench_claim", None);
+
+    measure_cpu(
+        &env,
+        "benchmark_claim_bounty",
+        BENCH_SOFT_LIMIT_MUTATION,
+        || {
+            client.claim_bounty(&contributor, &bounty_id);
+        },
+    );
+}
+
+#[test]
+fn benchmark_complete_bounty() {
+    let (env, creator, contributor, verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let (bounty_id, token_addr) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "bench_complete",
+        1000,
+        None,
+    );
+    client.claim_bounty(&contributor, &bounty_id);
+    let token_admin = StellarAssetClient::new(&env, &token_addr);
+    token_admin.mint(&verifier, &1000);
+
+    measure_cpu(
+        &env,
+        "benchmark_complete_bounty",
+        BENCH_SOFT_LIMIT_MUTATION,
+        || {
+            client.complete_bounty(&verifier, &bounty_id);
+        },
+    );
+}
+
+#[test]
+fn benchmark_get_bounty() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let bounty_id = make_bounty(&client, &env, &creator, "bench_get", None);
+
+    measure_cpu(&env, "benchmark_get_bounty", BENCH_SOFT_LIMIT_QUERY, || {
+        let _ = client.get_bounty(&bounty_id);
+    });
+}
+
+#[test]
+fn benchmark_get_contributor() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let bounty_id = make_bounty(&client, &env, &creator, "bench_contrib", None);
+    client.claim_bounty(&contributor, &bounty_id);
+
+    measure_cpu(
+        &env,
+        "benchmark_get_contributor",
+        BENCH_SOFT_LIMIT_QUERY,
+        || {
+            let _ = client.get_contributor(&contributor);
+        },
+    );
+}
+
+#[test]
+fn benchmark_get_bounty_count() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    make_bounty(&client, &env, &creator, "bench_count", None);
+
+    measure_cpu(
+        &env,
+        "benchmark_get_bounty_count",
+        BENCH_SOFT_LIMIT_QUERY,
+        || {
+            let _ = client.get_bounty_count();
+        },
+    );
+}
