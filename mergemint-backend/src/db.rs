@@ -52,6 +52,58 @@ pub fn read_db(db: &SharedDb) -> std::sync::RwLockReadGuard<'_, DbStore> {
     db.read().unwrap_or_else(|e| e.into_inner())
 }
 
+// ---------------------------------------------------------------------------
+// Idempotency-key store
+// ---------------------------------------------------------------------------
+
+/// Outcome recorded for a client-supplied `Idempotency-Key`.
+///
+/// `InFlight` is written *before* the transaction-submitting work begins, so
+/// a concurrent duplicate request (the client retried before the first
+/// response came back) sees the reservation rather than racing the same
+/// submission a second time. `Completed` replays the original response body
+/// once the first request finishes successfully.
+#[derive(Debug, Clone)]
+pub enum IdempotencyEntry {
+    InFlight,
+    Completed(String),
+}
+
+/// In-memory record of recently-seen idempotency keys, keyed by the raw
+/// `Idempotency-Key` header value.
+///
+/// Mirrors `DbStore`: a plain `HashMap` guarded by an `RwLock` kept separate
+/// from `DbStore` so idempotency bookkeeping never contends with the
+/// business-data lock.
+#[derive(Debug, Default)]
+pub struct IdempotencyStore {
+    pub entries: HashMap<String, IdempotencyEntry>,
+}
+
+/// Shared, thread-safe handle to the idempotency store.
+pub type SharedIdempotencyStore = Arc<RwLock<IdempotencyStore>>;
+
+/// Create a new, empty shared idempotency-store handle.
+pub fn new_shared_idempotency_store() -> SharedIdempotencyStore {
+    Arc::new(RwLock::new(IdempotencyStore::default()))
+}
+
+/// Acquire the idempotency-store write lock, recovering gracefully from lock
+/// poison (see the module-level note on lock-poison recovery, #473).
+pub fn acquire_idempotency(
+    store: &SharedIdempotencyStore,
+) -> std::sync::RwLockWriteGuard<'_, IdempotencyStore> {
+    store.write().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Acquire the idempotency-store read lock, recovering gracefully from lock
+/// poison.
+pub fn read_idempotency(
+    store: &SharedIdempotencyStore,
+) -> std::sync::RwLockReadGuard<'_, IdempotencyStore> {
+    store.read().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,5 +145,47 @@ mod tests {
 
         assert!(read_a.records.is_empty());
         assert!(read_b.records.is_empty());
+    }
+
+    #[test]
+    fn test_idempotency_store_starts_empty() {
+        let store = new_shared_idempotency_store();
+        assert!(read_idempotency(&store).entries.is_empty());
+    }
+
+    #[test]
+    fn test_idempotency_store_records_in_flight_then_completed() {
+        let store = new_shared_idempotency_store();
+
+        acquire_idempotency(&store)
+            .entries
+            .insert("key-1".to_string(), IdempotencyEntry::InFlight);
+        assert!(matches!(
+            read_idempotency(&store).entries.get("key-1"),
+            Some(IdempotencyEntry::InFlight)
+        ));
+
+        acquire_idempotency(&store).entries.insert(
+            "key-1".to_string(),
+            IdempotencyEntry::Completed(r#"{"ok":true}"#.to_string()),
+        );
+        assert!(matches!(
+            read_idempotency(&store).entries.get("key-1"),
+            Some(IdempotencyEntry::Completed(body)) if body == r#"{"ok":true}"#
+        ));
+    }
+
+    #[test]
+    fn test_idempotency_store_poison_recovery() {
+        let store = new_shared_idempotency_store();
+
+        let store_clone = Arc::clone(&store);
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = store_clone.write().unwrap();
+            panic!("simulated panic");
+        });
+
+        let guard = acquire_idempotency(&store);
+        assert!(guard.entries.is_empty(), "recovered store should be intact");
     }
 }

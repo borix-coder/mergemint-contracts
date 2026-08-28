@@ -51,7 +51,7 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 mod db;
 mod routes;
 
-use db::new_shared_db;
+use db::{new_shared_db, new_shared_idempotency_store};
 use routes::tx::{resolve_dispute, self_claim, AppState};
 
 /// Maximum allowed request body size (1 MiB).
@@ -93,7 +93,11 @@ async fn main() {
     warn_if_reward_token_allowlist_empty();
 
     let shared_db = new_shared_db();
-    let state = Arc::new(AppState { db: shared_db });
+    let idempotency = new_shared_idempotency_store();
+    let state = Arc::new(AppState {
+        db: shared_db,
+        idempotency,
+    });
 
     let app = Router::new()
         .route("/tx/resolve-dispute", post(resolve_dispute))
