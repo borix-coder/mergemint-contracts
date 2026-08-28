@@ -5,7 +5,7 @@ export function TxResultBanner({ result }: { result: SubmitResult | null }) {
   if (!result) return null;
 
   return (
-    <div className="tx-result-banner">
+    <div className="tx-result-banner" aria-live="polite">
       Transaction submitted —{" "}
       <a
         href={explorerTxUrl(result.hash, result.network)}
