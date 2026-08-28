@@ -938,6 +938,22 @@ fn test_status_count_initial_zero() {
     assert_eq!(client.get_status_count(&Symbol::new(&env, "cancelled")), 0);
 }
 
+/// get_status_count returns 0 for an arbitrary Symbol that is not a real
+/// bounty status (storage has no StatusCount key for it).
+#[test]
+fn test_status_count_unrecognized_symbol_returns_zero() {
+    let (env, _creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    assert_eq!(client.get_status_count(&Symbol::new(&env, "bogus")), 0);
+    assert_eq!(
+        client.get_status_count(&Symbol::new(&env, "not_a_status")),
+        0
+    );
+    assert_eq!(client.get_status_count(&Symbol::new(&env, "archived")), 0);
+}
+
 /// get_status_count returns 1 after creating a single bounty (open status).
 #[test]
 fn test_status_count_one_on_create() {
