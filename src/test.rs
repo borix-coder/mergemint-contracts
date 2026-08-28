@@ -629,6 +629,67 @@ fn test_creator_cannot_claim_own_bounty() {
     client.claim_bounty(&creator, &bounty_id);
 }
 
+// ===========================================================================
+// Issue #740 — security/prevent-creator-claim.md regression coverage
+// ===========================================================================
+
+/// `security/prevent-creator-claim.md`: creator self-claim must fail even when the
+/// bounty still has open assignee slots (`max_assignees` > 1).
+#[test]
+#[should_panic(expected = "creator cannot claim")]
+fn test_prevent_creator_claim_guard_multi_assignee_bounty() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let bounty_id = client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "multi_slot"),
+        &String::from_str(&env, "desc"),
+        &1000,
+        &create_token_and_mint(&env, &creator, &contract_id, 1000),
+        &0,
+        &None,
+        &Vec::new(&env),
+        &3,
+        &None,
+        &1,
+        &Vec::new(&env),
+    );
+
+    let bounty = client.get_bounty(&bounty_id).unwrap();
+    assert_eq!(bounty.max_assignees, 3);
+    assert_eq!(bounty.assignees.len(), 0);
+
+    client.claim_bounty(&creator, &bounty_id);
+}
+
+/// Confirms the guard fires before any assignee is recorded (wash-trade regression).
+#[test]
+#[should_panic(expected = "creator cannot claim")]
+fn test_prevent_creator_claim_guard_before_first_assignee() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, _token) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "guard_first",
+        1000,
+        None,
+    );
+
+    client.claim_bounty(&contributor, &bounty_id);
+
+    let bounty = client.get_bounty(&bounty_id).unwrap();
+    assert_eq!(bounty.assignees.len(), 1);
+
+    client.claim_bounty(&creator, &bounty_id);
+}
+
 #[test]
 fn test_bounty_count() {
     let (env, creator, _contributor, _verifier) = setup_test();
