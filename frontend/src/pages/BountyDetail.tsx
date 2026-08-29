@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { Bounty } from '../types';
-import { mapErrorMessage } from '../lib/format';
+import { mapErrorMessage } from '../utils/format';
 import { StatusBadge } from '../components/StatusBadge';
 
 export function BountyDetail() {
