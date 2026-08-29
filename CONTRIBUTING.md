@@ -39,10 +39,10 @@ This is required to build the contract for Soroban deployment.
 ### 3. Stellar CLI
 
 ```bash
-cargo install stellar-cli
+cargo install stellar-cli --version 23.0.1 --locked
 ```
 
-Verify with `stellar --version`. Used for building, deploying, and inspecting contracts.
+Verify with `stellar --version`. Used for building, deploying, and inspecting contracts. CI pins this exact version in `interface-check.yml` so `stellar contract inspect` output stays stable across runs — install the same version locally to avoid false-positive interface diffs.
 
 ---
 
