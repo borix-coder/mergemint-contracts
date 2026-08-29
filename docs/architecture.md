@@ -317,3 +317,65 @@ The following entries are covered:
 | `DataKey::OpenBounties` | `get_open_bounties`, `set_open_bounties` |
 
 `DataKey::BountyMeta` uses **temporary** storage (metadata is only needed during the bounty creation window) and does not require TTL extension.
+
+---
+
+## Solidity / Soroban Bounty Lifecycle Parity
+
+This section compares the bounty state machine modeled by the Soroban
+contract (`src/contract/`, documented above) against the state machine
+modeled by the Solidity contract `contracts/bounty/BountyRefresh.sol`, and
+records why they intentionally diverge.
+
+### Summary
+
+**They are not the same state machine, and are not meant to be.** The
+Soroban contract owns the canonical bounty lifecycle (`open` →
+`in_progress` → `completed` / `cancelled`). `BountyRefresh.sol` does not
+read or write that lifecycle at all — it manages an orthogonal, secondary
+lifecycle for **batching and retrying contributor-metrics refresh work**
+against an `IBountyManager` implementation. A bounty's core status field is
+never touched by anything in `BountyRefresh.sol`.
+
+### Side-by-side state comparison
+
+| | Soroban (`src/contract/`) | Solidity (`BountyRefresh.sol`) |
+|---|---|---|
+| What the states represent | Lifecycle of a single bounty | Lifecycle of a refresh **task**/**batch** operation |
+| States | `open`, `in_progress`, `completed`, `cancelled` | Task: pending → `completed` \| `failed`. Batch: created → `isProcessing` → `isCompleted` |
+| Terminal states | `completed`, `cancelled` | Task: `completed` or `failed` (both terminal). Batch: `isCompleted` |
+| Who triggers transitions | Creator, contributor, verifier, or any caller (for `expire_bounty`) | Contract owner only (`onlyOwner` on every state-changing entry point) |
+| Re-entrant transitions allowed? | No — each function guards against re-entering its own precondition (e.g. "bounty already assigned") | No — `processBatchParallel` uses `nonReentrant` and batch/task completion flags are one-way |
+| Failure handling | Guards `require`/panic before any state mutation; no partial-failure state | Per-task `try/catch` records `failed` + `errorMessage` without reverting the whole batch |
+| Persistence | Bounty struct keyed by `bounty_{id}` in Soroban persistent storage, subject to TTL extension | Task/batch structs keyed by `taskCounter`/`batchCounter` in EVM contract storage (no TTL concept) |
+
+### Why the divergence is intentional
+
+- **Different problem domains.** The Soroban contract is the source of
+  truth for "what state is this bounty in from the product's perspective."
+  `BountyRefresh.sol` exists purely to amortize the cost of pushing
+  contributor metric updates to an `IBountyManager` implementation in
+  batches, and to make that work resumable/parallelizable. It has no
+  concept of "open" or "claimed" — it only knows "this contributor's
+  metrics need a refresh" and "did that refresh succeed or fail."
+- **Different failure semantics on purpose.** The Soroban lifecycle treats
+  an invalid transition as a hard panic (nothing should ever observe a
+  bounty in an inconsistent state). `BountyRefresh.sol`'s task lifecycle
+  treats an individual refresh failure as data (`TaskFailed`) rather than a
+  revert, because one contributor's metrics update failing should not block
+  the rest of the batch.
+- **Different authorization models on purpose.** Every bounty-lifecycle
+  transition in Soroban is driven by the relevant party's own
+  `require_auth()` (creator, contributor, verifier, or anyone for the
+  permissionless `expire_bounty`). Every state-changing entry point in
+  `BountyRefresh.sol` is restricted to the contract owner, because refresh
+  batching is an operational/maintenance action, not a bounty-participant
+  action.
+
+### Follow-up
+
+No behavioral changes are proposed here. If a future requirement ties
+`BountyRefresh.sol` batch outcomes back into the Soroban bounty status
+(e.g. auto-flagging a bounty when metric refresh repeatedly fails), that
+should be scoped as its own issue rather than folded into this
+documentation pass.
