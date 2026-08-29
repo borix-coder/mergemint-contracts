@@ -32,6 +32,9 @@ pub enum ContractError {
     NotAllMilestonesCompleted,
     InvalidMilestoneIndex,
     MilestoneRewardsMismatch,
+    BountyAlreadyDisputed,
+    RewardOverflow,
+    EmptyMetadata,
 }
 
 /// Convert a `ContractError` to its canonical panic message and panic.
@@ -75,5 +78,8 @@ pub const fn message(e: ContractError) -> &'static str {
         ContractError::NotAllMilestonesCompleted => "not all milestones are completed",
         ContractError::InvalidMilestoneIndex => "invalid milestone index",
         ContractError::MilestoneRewardsMismatch => "milestone rewards do not sum to reward_amount",
+        ContractError::BountyAlreadyDisputed => "bounty already has an open dispute",
+        ContractError::RewardOverflow => "reward amount overflow",
+        ContractError::EmptyMetadata => "metadata must not be empty",
     }
 }

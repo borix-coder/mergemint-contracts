@@ -187,7 +187,9 @@ impl MergeMintContract {
         if !milestones.is_empty() {
             let mut total: i128 = 0;
             for m in milestones.iter() {
-                total += m.reward;
+                total = total
+                    .checked_add(m.reward)
+                    .unwrap_or_else(|| fail(ContractError::RewardOverflow));
             }
             if total != reward_amount {
                 fail(ContractError::MilestoneRewardsMismatch);
@@ -614,6 +616,9 @@ impl MergeMintContract {
         if bounty.status != Symbol::new(&env, STATUS_OPEN)
             && bounty.status != Symbol::new(&env, STATUS_IN_PROGRESS)
         {
+            if bounty.status == Symbol::new(&env, STATUS_DISPUTED) {
+                fail(ContractError::BountyAlreadyDisputed);
+            }
             fail(ContractError::BountyNotDisputed);
         }
 
@@ -729,6 +734,10 @@ impl MergeMintContract {
     /// Requires auth from `contributor`. No other address may modify this field.
     pub fn update_contributor_metadata(env: Env, contributor: Address, metadata: Symbol) {
         contributor.require_auth();
+
+        if metadata.len() == 0 {
+            fail(ContractError::EmptyMetadata);
+        }
 
         // #275: use Contributor::new for default construction (DONE - all call sites updated)
         let mut contrib = storage::get_contributor(&env, &contributor)
