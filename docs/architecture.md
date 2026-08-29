@@ -191,6 +191,72 @@ The two paths into `cancelled` emit different events to let off-chain indexers d
 
 ---
 
+## Solidity / Soroban Lifecycle Parity
+
+This section reconciles the two contracts named in issue #713 — the Solidity
+`BountyRefresh` contract (`contracts/bounty/BountyRefresh.sol`) and the Soroban
+`MergeMintContract` (`src/contract/`) — to confirm whether their bounty-lifecycle
+status transitions match, and to record any intentional divergence.
+
+### Finding: one bounty-lifecycle state machine, two different operational models
+
+Soroban is the **only** place a bounty's lifecycle `status` field is defined and
+transitioned. Its state machine (`open → in_progress → completed | cancelled`, plus
+the `disputed` sub-state) is the canonical bounty lifecycle and is documented in the
+previous section.
+
+The Solidity `BountyRefresh` contract does **not** model a bounty lifecycle at all.
+Its state is a batch/refresh *orchestration* model, scoped to re-computing contributor
+metrics in bulk. It never reads or writes a bounty `status`; it has no `open`,
+`in_progress`, `completed`, `cancelled`, or `disputed` bounty state and no transition
+functions resembling `claim_bounty` / `complete_bounty` / `cancel_bounty` /
+`expire_bounty`. `IBountyManager.sol` likewise exposes only
+`updateContributorMetrics`, `getBountyContributors`, and `getContributorCount`.
+
+This separation is **intentional**: `BountyRefresh` is an off-path operational tool
+for refreshing contributor metrics, not a second implementation of the bounty
+lifecycle. There is therefore no lifecycle to "keep in parity" beyond the Soroban
+machine.
+
+### State-model comparison
+
+| Concern | Solidity `BountyRefresh.sol` | Soroban `MergeMintContract` |
+|---------|------------------------------|-----------------------------|
+| What is modelled | Refresh task / batch run progress | Bounty lifecycle `status` |
+| States | `BountyRefreshTask.completed`, `BountyRefreshTask.failed`; `RefreshBatch.isProcessing`, `RefreshBatch.isCompleted`; `Pausable` | `open`, `in_progress`, `completed`, `cancelled`, `disputed` |
+| Transitions on | `createBatch` → `processBatchParallel` → `finalizeBatch` | `create_bounty` → `claim_bounty` → `complete_bounty` / `cancel_bounty` / `expire_bounty` / `raise_dispute` |
+| Touches bounty `status`? | No | Yes |
+| Auth model | `onlyOwner` + `nonReentrant` + `whenNotPaused` | `require_auth()` per role (creator / contributor / verifier) |
+
+### Lexical overlap with divergent meaning (documented so reviewers don't conflate them)
+
+The token `completed` appears in both contracts but means different things:
+
+- In Soroban, `completed` is a **terminal bounty state**: the reward was paid and
+  reputation updated; no transitions out.
+- In `BountyRefresh`, `RefreshBatch.isCompleted` (and `BountyRefreshTask.completed`)
+  means the **refresh run finished** (success or failure counted), independent of any
+  bounty status. It is an operational flag, not a bounty lifecycle state.
+
+Because the two `completed` values live in unrelated structs and are never bridged,
+there is no shared transition to keep consistent.
+
+### `disputed` state
+
+`disputed` is implemented in Soroban via `raise_dispute` / `resolve_dispute`
+(`src/contract/mutations.rs`). It has no counterpart and no relevance in
+`BountyRefresh`, which has no bounty-lifecycle states to dispute. This is expected
+given the contracts model different concerns.
+
+### Recommended follow-up (out of scope for this PR)
+
+If a future change introduces bounty-lifecycle logic into the Solidity side (e.g. a
+real `BountyManager` that mutates bounty `status`), that is the point at which the two
+state machines must be reconciled for parity. Until then, parity is satisfied by the
+single-sourced Soroban machine.
+
+---
+
 ## Security Model
 
 - All state-changing functions require caller authentication via `require_auth()`
