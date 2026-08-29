@@ -1,6 +1,7 @@
 import { useTxFlow } from "../hooks/useTxFlow";
 import { TxResultBanner } from "./TxResultBanner";
 import { CopyButton } from "./CopyButton";
+import { TxButton } from "./TxButton";
 import { Bounty, NetworkName } from "../lib/types";
 import { shortenAddress } from "../utils/format";
 
@@ -60,9 +61,9 @@ export function BountyDetail({ bounty, network, onClaim }: BountyDetailProps) {
         </div>
       )}
 
-      <button onClick={perform} disabled={pending}>
-        {pending ? "Submitting…" : "Claim"}
-      </button>
+      <TxButton onClick={perform} pending={pending} pendingLabel="Submitting…">
+        Claim
+      </TxButton>
 
       {optimistic && (
         <p className="tx-optimistic-note">Claim submitted — confirming on-chain…</p>

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useTxFlow } from "../hooks/useTxFlow";
 import { TxResultBanner } from "./TxResultBanner";
+import { TxButton } from "./TxButton";
 import { NetworkName } from "../lib/types";
 
 interface CreateBountyProps {
@@ -115,9 +116,9 @@ export function CreateBounty({ network, onSubmit }: CreateBountyProps) {
         </label>
       </details>
 
-      <button type="submit" disabled={pending}>
-        {pending ? "Submitting…" : "Create bounty"}
-      </button>
+      <TxButton type="submit" pending={pending} pendingLabel="Submitting…">
+        Create bounty
+      </TxButton>
 
       {error && <p className="error">{error}</p>}
       <TxResultBanner result={result} />
