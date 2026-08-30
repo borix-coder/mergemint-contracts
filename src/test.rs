@@ -190,7 +190,6 @@ fn test_five_tags_allowed() {
     let bounty = client.get_bounty(&bounty_id).unwrap();
     assert_eq!(bounty.tags.len(), 5);
 }
-
 /// Supplying more than 5 tags must panic with "too many tags".
 #[test]
 #[should_panic(expected = "too many tags")]
@@ -1606,7 +1605,6 @@ fn test_status_count_matches_index_length() {
             .len(),
     );
 }
-
 /// The assignee calling complete_bounty as their own verifier must panic.
 #[test]
 #[should_panic(expected = "verifier cannot be the assignee")]
