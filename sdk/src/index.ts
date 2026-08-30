@@ -33,6 +33,22 @@ export const MAINNET: Omit<NetworkConfig, "contractId"> = {
   networkPassphrase: Networks.PUBLIC,
 };
 
+/**
+ * Builds a full `NetworkConfig` by combining a base template (e.g. `TESTNET` or `MAINNET`)
+ * with a specific `contractId` and optional overrides.
+ */
+export function createNetworkConfig(
+  base: Omit<NetworkConfig, "contractId">,
+  contractId: string,
+  overrides?: Partial<Omit<NetworkConfig, "contractId">>
+): NetworkConfig {
+  return {
+    ...base,
+    contractId,
+    ...overrides,
+  };
+}
+
 // === Helpers
 
 function addressToScVal(address: string): xdr.ScVal {
