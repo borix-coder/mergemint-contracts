@@ -9,6 +9,7 @@
 pub enum ContractError {
     BountyNotFound,
     BountyAlreadyAssigned,
+    AlreadyClaimed,
     BountyNotOpen,
     BountyNotInProgress,
     BountyHasNoAssignee,
@@ -48,6 +49,7 @@ pub const fn message(e: ContractError) -> &'static str {
     match e {
         ContractError::BountyNotFound => "bounty not found",
         ContractError::BountyAlreadyAssigned => "bounty already assigned",
+        ContractError::AlreadyClaimed => "bounty already claimed by contributor",
         ContractError::BountyNotOpen => "bounty not open",
         ContractError::BountyNotInProgress => "bounty is not in progress",
         ContractError::BountyHasNoAssignee => "bounty has no assignee",
