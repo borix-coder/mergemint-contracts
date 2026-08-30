@@ -58,12 +58,9 @@ fn decrement_active_claims(contrib: &mut Contributor) {
 
 /// Complete a bounty by marking it as completed and distributing payout.
 /// Used as a helper by both complete_bounty and approve_completion.
-fn complete_bounty_inner(env: Env, bounty_id: BountyId) {
-    let mut bounty = match storage::get_bounty(&env, &bounty_id) {
-        Some(b) => b,
-        None => fail(ContractError::BountyNotFound),
-    };
-
+///
+/// Caller must have already loaded `bounty` from storage (avoids a redundant read).
+fn complete_bounty_inner(env: Env, bounty_id: BountyId, mut bounty: Bounty) {
     if bounty.status != Symbol::new(&env, STATUS_IN_PROGRESS) {
         fail(ContractError::BountyNotInProgress);
     }
@@ -437,7 +434,7 @@ impl MergeMintContract {
         // AUTH: must be first — no storage reads or side-effects before this line.
         verifier.require_auth();
 
-        let mut bounty = match storage::get_bounty(&env, &bounty_id) {
+        let bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
             None => fail(ContractError::BountyNotFound),
         };
@@ -472,43 +469,7 @@ impl MergeMintContract {
             }
         }
 
-        if !bounty.milestones.is_empty() {
-            if !bounty.milestones.iter().all(|m| m.completed) {
-                fail(ContractError::NotAllMilestonesCompleted);
-            }
-            let previous_status = bounty.status.clone();
-            bounty.status = Symbol::new(&env, STATUS_COMPLETED);
-            storage::store_bounty(&env, &bounty_id, &bounty);
-            storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
-            let (primary_assignee, _) = bounty.assignees.get(0).unwrap();
-            events::emit_bounty_completed(&env, &bounty_id, &primary_assignee);
-            return;
-        }
-
-        // Checks-effects-interactions pattern:
-        // 1. Compute all payouts and update contributor state in memory.
-        // 2. Persist the status change (marking the bounty completed) BEFORE any
-        //    cross-contract token transfer. This ensures that a reentrant call back
-        //    into complete_bounty would be rejected by GUARD 2 above.
-        // 3. Execute token transfers via the shared helper.
-        let (primary_assignee, _) = bounty.assignees.get(0).unwrap();
-        let previous_status = bounty.status.clone();
-        bounty.status = Symbol::new(&env, STATUS_COMPLETED);
-        storage::store_bounty(&env, &bounty_id, &bounty);
-        storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
-
-        // Now safe to execute token transfers — bounty is already marked completed.
-        let token = TokenClient::new(&env, &bounty.reward_token);
-        distribute_payout(
-            &env,
-            &bounty_id,
-            &bounty.assignees,
-            &env.current_contract_address(),
-            &token,
-            bounty.reward_amount,
-        );
-
-        events::emit_bounty_completed(&env, &bounty_id, &primary_assignee);
+        complete_bounty_inner(env, bounty_id, bounty);
     }
 
     /// Record one verifier's approval for a multi-sig bounty completion.
@@ -538,7 +499,7 @@ impl MergeMintContract {
 
         // If no required_verifiers list is set, fall back to immediate single-verifier completion.
         if bounty.required_verifiers.is_none() {
-            complete_bounty_inner(env, bounty_id);
+            complete_bounty_inner(env, bounty_id, bounty);
             return;
         }
 
@@ -660,6 +621,15 @@ impl MergeMintContract {
         // The arbitrator must be the bounty creator; there is no separate admin address.
         if arbitrator != bounty.creator {
             fail(ContractError::NotArbitrator);
+        }
+
+        // GUARD: arbitrator (creator) must meet the bounty's own min_reputation threshold.
+        // This reflects the security/minimum-reputation-enforcement.md recommendation
+        // that dispute resolvers are subject to a reputation floor.
+        let arbitrator_contrib = storage::get_contributor(&env, &arbitrator)
+            .unwrap_or_else(|| Contributor::new(arbitrator.clone()));
+        if bounty.min_reputation > 0 && arbitrator_contrib.reputation < bounty.min_reputation {
+            fail(ContractError::ReputationTooLow);
         }
 
         let resolve_complete = Symbol::new(&env, "complete");
