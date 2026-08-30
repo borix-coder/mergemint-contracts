@@ -74,9 +74,10 @@ fn decrement_active_claims(contrib: &mut Contributor) {
 }
 
 /// Complete a bounty by marking it as completed and distributing payout.
-/// Used as a helper by both complete_bounty and approve_completion.
+/// Used as a helper by both `complete_bounty` and `approve_completion`.
 ///
-/// Caller must have already loaded `bounty` from storage (avoids a redundant read).
+/// Takes the already-loaded `bounty` rather than re-reading it from storage —
+/// the caller has already fetched it (avoids a redundant read).
 fn complete_bounty_inner(env: Env, bounty_id: BountyId, mut bounty: Bounty) {
     if bounty.status != Symbol::new(&env, STATUS_IN_PROGRESS) {
         fail(ContractError::BountyNotInProgress);
