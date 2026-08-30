@@ -2,20 +2,14 @@
 
 Performance notes for the MergeMint contract. Instruction counts are measured in two ways:
 
-1. **Unit tests** — `env.cost_estimate().budget().cpu_instruction_cost()` in `src/test.rs` (see `benchmark_*` tests) measures CPU instructions consumed in the Soroban simulator during `cargo test`.
+1. **Unit tests** — `env.cost_estimate().budget().cpu_instruction_cost()` in `src/test.rs` (see `benchmark_*` tests) measures CPU instructions consumed in the Soroban simulator during `cargo test`. Each benchmark resets the tracker with `reset_tracker()` before the measured call.
 2. **On-chain simulation** — `simulateTransaction` RPC call returns `cost.cpuInsns` for real network measurements.
 
 ---
 
 ## CPU Instruction Baselines (Issue #289)
 
-Baseline measurements captured by the `benchmark_*` tests in `src/test.rs` using `env.cost_estimate().budget().cpu_instruction_cost()`. Reproduce with:
-
-```bash
-cargo test benchmark --lib -- --nocapture
-```
-
-Captured on `main` after the Soroban SDK 27.0.6 bump (2026-08-28):
+Baseline measurements captured by the `benchmark_*` tests in `src/test.rs` using `env.cost_estimate().budget().cpu_instruction_cost()`. Run `cargo test benchmark -- --nocapture` to reproduce.
 
 | Function | CPU Instructions | Soft Limit |
 |----------|-----------------|------------|
@@ -26,7 +20,7 @@ Captured on `main` after the Soroban SDK 27.0.6 bump (2026-08-28):
 | `get_contributor` | 68,465 | 500,000 |
 | `get_bounty_count` | 42,974 | 500,000 |
 
-> Soft limits are guardrails in the benchmark tests; all current measurements are well below their limits. Re-run `cargo test benchmark --lib -- --nocapture` after contract changes that touch these entrypoints.
+> Measured 2026-08-28 on Soroban SDK 27.0.0 / `mergemint-contracts` main. Native Rust test harness counts are typically lower than on-chain WASM; use these as regression baselines, not production fee quotes.
 
 ---
 
