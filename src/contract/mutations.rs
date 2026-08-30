@@ -656,6 +656,15 @@ impl MergeMintContract {
             fail(ContractError::NotArbitrator);
         }
 
+        // GUARD: arbitrator (creator) must meet the bounty's own min_reputation threshold.
+        // This reflects the security/minimum-reputation-enforcement.md recommendation
+        // that dispute resolvers are subject to a reputation floor.
+        let arbitrator_contrib = storage::get_contributor(&env, &arbitrator)
+            .unwrap_or_else(|| Contributor::new(arbitrator.clone()));
+        if bounty.min_reputation > 0 && arbitrator_contrib.reputation < bounty.min_reputation {
+            fail(ContractError::ReputationTooLow);
+        }
+
         let resolve_complete = Symbol::new(&env, "complete");
         let resolve_cancel = Symbol::new(&env, "cancel");
 
