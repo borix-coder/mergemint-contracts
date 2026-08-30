@@ -38,8 +38,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::{routing::post, Router};
+use axum::{
+    http::{header::CONTENT_TYPE, HeaderValue, Method},
+    routing::{get, post},
+    Router,
+};
 use tower_http::{
+    cors::{AllowOrigin, CorsLayer},
     limit::RequestBodyLimitLayer,
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
     timeout::TimeoutLayer,
@@ -68,6 +73,11 @@ const REQUEST_ID_HEADER: &str = "x-request-id";
 
 /// Reward-token allowlist env var consumed by create-bounty flows.
 const ALLOWLISTED_REWARD_TOKENS_ENV: &str = "ALLOWLISTED_REWARD_TOKENS";
+
+/// Env var holding a comma-separated allow-list of origins permitted to make
+/// cross-origin requests, e.g.
+/// "https://app.mergemint.xyz,https://staging.mergemint.xyz".
+const CORS_ALLOWED_ORIGINS_ENV: &str = "CORS_ALLOWED_ORIGINS";
 
 #[tokio::main]
 async fn main() {
@@ -102,6 +112,11 @@ async fn main() {
     let app = Router::new()
         .route("/tx/resolve-dispute", post(resolve_dispute))
         .route("/tx/self-claim", post(self_claim))
+        .route("/bounties", get(list_bounties))
+        .route(
+            "/bounties/assignee/:address",
+            get(list_bounties_by_assignee),
+        )
         .with_state(state)
         // ── Correlation-ID middleware stack (#486) ──────────────────────────
         //
@@ -141,7 +156,11 @@ async fn main() {
         // Guard against slow-loris / oversized-body attacks (#476).
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         // Cancel requests that exceed the wall-clock budget (#476).
-        .layer(TimeoutLayer::new(REQUEST_TIMEOUT));
+        .layer(TimeoutLayer::new(REQUEST_TIMEOUT))
+        // Restrict cross-origin browser requests to the configured allow-list.
+        .layer(build_cors_layer(
+            &std::env::var(CORS_ALLOWED_ORIGINS_ENV).unwrap_or_default(),
+        ));
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080")
         .await
@@ -200,6 +219,35 @@ fn warn_if_reward_token_allowlist_empty() {
             "ALLOWLISTED_REWARD_TOKENS is empty — all create_bounty requests will be rejected"
         );
     }
+}
+
+/// Build the CORS layer from an explicit, comma-separated origin allow-list
+/// string (see `CORS_ALLOWED_ORIGINS_ENV`). Kept separate from the env var
+/// lookup so it's trivially testable with a fixed input.
+fn build_cors_layer(allowed_origins: &str) -> CorsLayer {
+    let origins: Vec<HeaderValue> = allowed_origins
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|origin| match origin.parse::<HeaderValue>() {
+            Ok(value) => Some(value),
+            Err(_) => {
+                tracing::warn!(origin, "ignoring invalid CORS_ALLOWED_ORIGINS entry");
+                None
+            }
+        })
+        .collect();
+
+    if origins.is_empty() {
+        tracing::warn!(
+            "CORS_ALLOWED_ORIGINS is empty — no cross-origin browser requests will be permitted"
+        );
+    }
+
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([Method::GET, Method::POST])
+        .allow_headers([CONTENT_TYPE])
 }
 
 #[cfg(test)]
