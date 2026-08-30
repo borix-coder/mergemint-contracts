@@ -283,6 +283,17 @@ fn test_get_bounties_by_creator_unknown_address_empty() {
     );
 }
 
+/// A freshly-registered contributor with no bounty claimed has no active
+/// bounty — `get_contributor_active_bounty` must return `None`.
+#[test]
+fn test_get_contributor_active_bounty_none_when_no_claim() {
+    let (env, _creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    assert_eq!(client.get_contributor_active_bounty(&contributor), None);
+}
+
 /// Issue #634 — `get_open_bounties_paged` clamps `limit` to 50 (MAX_LIMIT) via `paginate`.
 #[test]
 fn test_get_open_bounties_paged_limit_capped_at_max() {
