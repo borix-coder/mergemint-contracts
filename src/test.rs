@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MIT
 
+#[cfg(test)]
+extern crate std;
+
 use crate::contract::MergeMintContract;
+use crate::types::Milestone;
 use crate::MergeMintContractClient;
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
@@ -208,6 +212,42 @@ fn test_too_many_tags_panics() {
     );
 }
 
+/// get_bounties_by_tag returns an empty `Vec` (not an error) for tags that were
+/// never attached to any open bounty. The query scans open bounties and filters
+/// by tag membership; unregistered tags simply match nothing.
+#[test]
+fn test_get_bounties_by_tag_unknown_tags_return_empty() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    for tag in ["ghost", "never_used", "zzz", "unregistered"] {
+        assert_eq!(client.get_bounties_by_tag(&Symbol::new(&env, tag)).len(), 0);
+    }
+
+    let mut tags: Vec<Symbol> = Vec::new(&env);
+    tags.push_back(Symbol::new(&env, "bug"));
+    tags.push_back(Symbol::new(&env, "docs"));
+    let _bounty_id = client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "tagged"),
+        &String::from_str(&env, "desc"),
+        &1000,
+        &create_token_and_mint(&env, &creator, &contract_id, 0),
+        &0,
+        &None,
+        &tags,
+        &1,
+        &None,
+        &1,
+        &Vec::new(&env),
+    );
+
+    for tag in ["ghost", "frontend", "rust", "missing"] {
+        assert_eq!(client.get_bounties_by_tag(&Symbol::new(&env, tag)).len(), 0);
+    }
+}
+
 // ===========================================================================
 // Issue 2 — get_bounties_by_creator
 // ===========================================================================
@@ -270,6 +310,42 @@ fn test_get_bounties_by_creator_unknown_address_empty() {
             .len(),
         0
     );
+}
+
+/// `get_bounties_by_creator` clamps `limit` to 50 (MAX_LIMIT) per `paginate`.
+#[test]
+fn test_get_bounties_by_creator_limit_capped_at_max() {
+    const CREATOR_BOUNTY_TAGS: [&str; 55] = [
+        "c00", "c01", "c02", "c03", "c04", "c05", "c06", "c07", "c08", "c09", "c10", "c11", "c12",
+        "c13", "c14", "c15", "c16", "c17", "c18", "c19", "c20", "c21", "c22", "c23", "c24", "c25",
+        "c26", "c27", "c28", "c29", "c30", "c31", "c32", "c33", "c34", "c35", "c36", "c37", "c38",
+        "c39", "c40", "c41", "c42", "c43", "c44", "c45", "c46", "c47", "c48", "c49", "c50", "c51",
+        "c52", "c53", "c54",
+    ];
+
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    for tag in CREATOR_BOUNTY_TAGS {
+        make_bounty(&client, &env, &creator, tag, None);
+    }
+
+    let (page, next) = client.get_bounties_by_creator(&creator, &None, &1000);
+    assert_eq!(
+        page.len(),
+        50,
+        "limit above cap must return at most 50 items"
+    );
+    assert_eq!(
+        next,
+        Some(50),
+        "next_cursor should point past the capped page"
+    );
+
+    let (page2, next2) = client.get_bounties_by_creator(&creator, &Some(50), &1000);
+    assert_eq!(page2.len(), 5, "remaining items after first capped page");
+    assert_eq!(next2, None, "list exhausted after second page");
 }
 
 // ===========================================================================
@@ -605,6 +681,10 @@ fn test_claim_bounty() {
     assert_eq!(share, 10_000u32);
 }
 
+// ===========================================================================
+// Issue #757 — Security: prevent creator self-claim (security/prevent-creator-claim.md)
+// ===========================================================================
+
 #[test]
 #[should_panic(expected = "creator cannot claim")]
 fn test_creator_cannot_claim_own_bounty() {
@@ -627,6 +707,36 @@ fn test_creator_cannot_claim_own_bounty() {
         &Vec::new(&env),
     );
     client.claim_bounty(&creator, &bounty_id);
+}
+
+/// The creator self-claim guard fires even when the creator address is
+/// passed through an alias variable, confirming no bypass via indirection.
+/// Regression test for security/prevent-creator-claim.md.
+#[test]
+#[should_panic(expected = "creator cannot claim")]
+fn test_creator_self_claim_guard_no_alias_bypass() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let bounty_id = client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "alias_test"),
+        &String::from_str(&env, "desc"),
+        &1000,
+        &create_token_and_mint(&env, &creator, &contract_id, 0),
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &Vec::new(&env),
+    );
+
+    // Alias the creator address — the guard must still fire.
+    let also_creator = creator.clone();
+    client.claim_bounty(&also_creator, &bounty_id);
 }
 
 #[test]
@@ -938,6 +1048,22 @@ fn test_status_count_initial_zero() {
     assert_eq!(client.get_status_count(&Symbol::new(&env, "cancelled")), 0);
 }
 
+/// get_status_count returns 0 for an arbitrary Symbol that is not a real
+/// bounty status (storage has no StatusCount key for it).
+#[test]
+fn test_status_count_unrecognized_symbol_returns_zero() {
+    let (env, _creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    assert_eq!(client.get_status_count(&Symbol::new(&env, "bogus")), 0);
+    assert_eq!(
+        client.get_status_count(&Symbol::new(&env, "not_a_status")),
+        0
+    );
+    assert_eq!(client.get_status_count(&Symbol::new(&env, "archived")), 0);
+}
+
 /// get_status_count returns 1 after creating a single bounty (open status).
 #[test]
 fn test_status_count_one_on_create() {
@@ -1221,6 +1347,26 @@ fn test_status_count_matches_index_length() {
             .0
             .len(),
     );
+}
+
+/// get_status_count returns 0 (not an error) for a Symbol that is not a
+/// contract-registered status. Storage uses per-status keys; missing keys
+/// default to 0 via `unwrap_or(0)` in `storage::get_status_count`.
+#[test]
+fn test_status_count_unknown_symbol_returns_zero() {
+    let (env, _creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    assert_eq!(
+        client.get_status_count(&Symbol::new(&env, "nonexistent")),
+        0
+    );
+    assert_eq!(
+        client.get_status_count(&Symbol::new(&env, "bogus_status")),
+        0
+    );
+    assert_eq!(client.get_status_count(&Symbol::new(&env, "active")), 0);
 }
 
 /// The assignee calling complete_bounty as their own verifier must panic.
@@ -1911,6 +2057,40 @@ fn test_approve_completion_unauthorized_verifier_rejected() {
     client.approve_completion(&outsider, &bounty_id);
 }
 
+/// Assignee cannot approve their own bounty completion (self-approval guard).
+#[test]
+#[should_panic(expected = "verifier cannot be the assignee")]
+fn test_approve_completion_assignee_cannot_self_approve() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let reward_amount: i128 = 1000;
+    let v2 = Address::generate(&env);
+    let mut verifiers: Vec<Address> = Vec::new(&env);
+    verifiers.push_back(contributor.clone());
+    verifiers.push_back(v2.clone());
+
+    let token_addr = create_token_and_mint(&env, &creator, &contract_id, reward_amount);
+    let bounty_id = client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "self_approve"),
+        &String::from_str(&env, "self-approval guard bounty"),
+        &reward_amount,
+        &token_addr,
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &Some(verifiers),
+        &1,
+        &Vec::new(&env),
+    );
+
+    client.claim_bounty(&contributor, &bounty_id);
+    client.approve_completion(&contributor, &bounty_id);
+}
+
 // ===========================================================================
 // Issue #35/#36/#38 — Token-balance invariant test for escrow
 // ===========================================================================
@@ -2013,4 +2193,74 @@ fn test_escrow_balance_invariant() {
         expected_balance(0, 0),
         "after complete b3: contract balance must be zero"
     );
+}
+
+// ===========================================================================
+// Issue #756 — resolve_dispute arbitrator reputation guard
+// ===========================================================================
+
+/// resolve_dispute must reject an arbitrator whose reputation is below
+/// the bounty's min_reputation threshold.
+/// Regression test for security/minimum-reputation-enforcement.md.
+#[test]
+#[should_panic(expected = "contributor reputation is too low")]
+fn test_resolve_dispute_rejects_low_reputation_arbitrator() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    // Create a bounty with min_reputation = 50.
+    // The creator has 0 reputation (fresh account), so they cannot resolve
+    // a dispute on their own bounty until their reputation meets the threshold.
+    let reward_amount: i128 = 1000;
+    let token_addr = create_token_and_mint(&env, &creator, &contract_id, reward_amount);
+    let bounty_id = client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "rep_disp"),
+        &String::from_str(&env, "desc"),
+        &reward_amount,
+        &token_addr,
+        &50, // min_reputation = 50
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &Vec::new(&env),
+    );
+
+    client.claim_bounty(&contributor, &bounty_id);
+    client.raise_dispute(&creator, &bounty_id);
+
+    // Creator has 0 reputation, bounty requires 50 — must panic.
+    client.resolve_dispute(&creator, &bounty_id, &Symbol::new(&env, "cancel"));
+}
+
+/// resolve_dispute succeeds when the arbitrator meets the reputation threshold.
+#[test]
+fn test_resolve_dispute_accepts_sufficient_reputation_arbitrator() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    // Create a bounty with min_reputation = 0 (no floor).
+    let reward_amount: i128 = 1000;
+    let (bounty_id, _token_addr) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "rep_disp_ok",
+        reward_amount,
+        None,
+    );
+
+    client.claim_bounty(&contributor, &bounty_id);
+    client.raise_dispute(&creator, &bounty_id);
+
+    // min_reputation = 0 means no floor — creator can always resolve.
+    client.resolve_dispute(&creator, &bounty_id, &Symbol::new(&env, "cancel"));
+
+    let bounty = client.get_bounty(&bounty_id).unwrap();
+    assert_eq!(bounty.status, Symbol::new(&env, "cancelled"));
 }
