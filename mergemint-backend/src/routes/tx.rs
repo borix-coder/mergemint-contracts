@@ -10,6 +10,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::db::{
     acquire_idempotency, read_db, read_idempotency, IdempotencyEntry, SharedDb,
@@ -125,6 +126,10 @@ fn finalize_idempotency_key(store: &SharedIdempotencyStore, key: String, result:
     }
 }
 
+/// Default self-claim rate limit: 5 relay submissions per claimant per minute.
+pub const SELF_CLAIM_RATE_LIMIT: u32 = 5;
+pub const SELF_CLAIM_RATE_WINDOW: Duration = Duration::from_secs(60);
+
 // ---------------------------------------------------------------------------
 // Error helpers
 // ---------------------------------------------------------------------------
@@ -158,6 +163,14 @@ impl AppError {
             message: msg.into(),
         };
         (StatusCode::NOT_FOUND, Json(err))
+    }
+
+    pub fn too_many_requests(msg: impl Into<String>) -> (StatusCode, Json<AppError>) {
+        let err = AppError {
+            code: 429,
+            message: msg.into(),
+        };
+        (StatusCode::TOO_MANY_REQUESTS, Json(err))
     }
 
     /// Construct an internal server error.
@@ -233,7 +246,7 @@ pub struct ResolveDisputeResponse {
     pub xdr: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct SelfClaimRequest {
     pub bounty_id: String,
     pub claimant: String,
@@ -389,8 +402,11 @@ async fn self_claim_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rate_limit::TokenBucketLimiter;
     use axum::body::to_bytes;
+    use axum::extract::State;
     use axum::response::IntoResponse;
+    use std::time::Duration;
 
     /// Helper: convert a Response body to a String.
     async fn body_string(response: axum::response::Response) -> String {

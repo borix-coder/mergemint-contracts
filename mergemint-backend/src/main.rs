@@ -54,6 +54,7 @@ use tracing::Level;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 mod db;
+mod rate_limit;
 mod routes;
 
 use db::{new_shared_db, new_shared_idempotency_store};
