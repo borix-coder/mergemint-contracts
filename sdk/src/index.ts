@@ -206,13 +206,19 @@ export class MergeMintSDK {
    * an out-of-range `attempts` or `backoffMs`.
    */
   constructor(config: NetworkConfig) {
+    if (!config.contractId || typeof config.contractId !== "string" || config.contractId.trim() === "") {
+      throw new Error("Invalid contractId: contractId must be a non-empty string.");
+    }
+    if (config.contractId.includes("...") || config.contractId.startsWith("0x0000000000000000000000000000000000000000000000000000000000000000")) {
+      throw new Error(`Invalid contractId: placeholder or null address detected in configuration: "${config.contractId}".`);
+    }
     if (config.rpcUrl.includes("XCa...") || config.rpcUrl.includes("...")) {
       throw new Error("Invalid RPC URL: placeholder detected in configuration. Please provide a valid Soroban RPC provider URL.");
     }
     this.rpc = new SorobanRpc.Server(config.rpcUrl);
-    this.contract = new Contract(config.contractId);
+    this.contract = new Contract(config.contractId.trim());
     this.networkPassphrase = config.networkPassphrase;
-    this.contractId = config.contractId;
+    this.contractId = config.contractId.trim();
     this.retry = normalizeRetry(config.retry);
   }
 
