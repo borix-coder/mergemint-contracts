@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT
 
+#[cfg(test)]
+extern crate std;
+
 use crate::contract::MergeMintContract;
 use crate::types::Milestone;
 use crate::MergeMintContractClient;
