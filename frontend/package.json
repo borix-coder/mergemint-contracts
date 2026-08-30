@@ -8,6 +8,9 @@
   },
   "devDependencies": {
     "vitest": "^2.0.0",
-    "@playwright/test": "^1.45.0"
+    "@playwright/test": "^1.45.0",
+    "@testing-library/react": "^16.0.0",
+    "@testing-library/jest-dom": "^6.4.6",
+    "jsdom": "^24.1.3"
   }
 }
