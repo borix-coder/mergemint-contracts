@@ -7,7 +7,7 @@ use crate::contract::MergeMintContract;
 use crate::types::Milestone;
 use crate::MergeMintContractClient;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger as _},
+    testutils::{storage::Persistent as _, Address as _, Ledger as _},
     token::StellarAssetClient,
     Address, Env, String, Symbol, Vec,
 };
