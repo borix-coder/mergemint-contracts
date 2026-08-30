@@ -208,6 +208,42 @@ fn test_too_many_tags_panics() {
     );
 }
 
+/// get_bounties_by_tag returns an empty `Vec` (not an error) for tags that were
+/// never attached to any open bounty. The query scans open bounties and filters
+/// by tag membership; unregistered tags simply match nothing.
+#[test]
+fn test_get_bounties_by_tag_unknown_tags_return_empty() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    for tag in ["ghost", "never_used", "zzz", "unregistered"] {
+        assert_eq!(client.get_bounties_by_tag(&Symbol::new(&env, tag)).len(), 0);
+    }
+
+    let mut tags: Vec<Symbol> = Vec::new(&env);
+    tags.push_back(Symbol::new(&env, "bug"));
+    tags.push_back(Symbol::new(&env, "docs"));
+    let _bounty_id = client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "tagged"),
+        &String::from_str(&env, "desc"),
+        &1000,
+        &create_token_and_mint(&env, &creator, &contract_id, 0),
+        &0,
+        &None,
+        &tags,
+        &1,
+        &None,
+        &1,
+        &Vec::new(&env),
+    );
+
+    for tag in ["ghost", "frontend", "rust", "missing"] {
+        assert_eq!(client.get_bounties_by_tag(&Symbol::new(&env, tag)).len(), 0);
+    }
+}
+
 // ===========================================================================
 // Issue 2 — get_bounties_by_creator
 // ===========================================================================
