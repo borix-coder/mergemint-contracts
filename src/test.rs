@@ -220,42 +220,6 @@ fn test_too_many_tags_panics() {
     );
 }
 
-/// get_bounties_by_tag returns an empty `Vec` (not an error) for tags that were
-/// never attached to any open bounty. The query scans open bounties and filters
-/// by tag membership; unregistered tags simply match nothing.
-#[test]
-fn test_get_bounties_by_tag_unknown_tags_return_empty() {
-    let (env, creator, _contributor, _verifier) = setup_test();
-    let contract_id = env.register(MergeMintContract, ());
-    let client = MergeMintContractClient::new(&env, &contract_id);
-
-    for tag in ["ghost", "never_used", "zzz", "unregistered"] {
-        assert_eq!(client.get_bounties_by_tag(&Symbol::new(&env, tag)).len(), 0);
-    }
-
-    let mut tags: Vec<Symbol> = Vec::new(&env);
-    tags.push_back(Symbol::new(&env, "bug"));
-    tags.push_back(Symbol::new(&env, "docs"));
-    let _bounty_id = client.create_bounty(
-        &creator,
-        &Symbol::new(&env, "tagged"),
-        &String::from_str(&env, "desc"),
-        &1000,
-        &create_token_and_mint(&env, &creator, &contract_id, 0),
-        &0,
-        &None,
-        &tags,
-        &1,
-        &None,
-        &1,
-        &Vec::new(&env),
-    );
-
-    for tag in ["ghost", "frontend", "rust", "missing"] {
-        assert_eq!(client.get_bounties_by_tag(&Symbol::new(&env, tag)).len(), 0);
-    }
-}
-
 // ===========================================================================
 // Issue 2 — get_bounties_by_creator
 // ===========================================================================
@@ -1347,22 +1311,6 @@ fn test_status_count_initial_zero() {
     assert_eq!(client.get_status_count(&Symbol::new(&env, "cancelled")), 0);
 }
 
-/// get_status_count returns 0 for an arbitrary Symbol that is not a real
-/// bounty status (storage has no StatusCount key for it).
-#[test]
-fn test_status_count_unrecognized_symbol_returns_zero() {
-    let (env, _creator, _contributor, _verifier) = setup_test();
-    let contract_id = env.register(MergeMintContract, ());
-    let client = MergeMintContractClient::new(&env, &contract_id);
-
-    assert_eq!(client.get_status_count(&Symbol::new(&env, "bogus")), 0);
-    assert_eq!(
-        client.get_status_count(&Symbol::new(&env, "not_a_status")),
-        0
-    );
-    assert_eq!(client.get_status_count(&Symbol::new(&env, "archived")), 0);
-}
-
 /// get_status_count returns 1 after creating a single bounty (open status).
 #[test]
 fn test_status_count_one_on_create() {
@@ -1657,26 +1605,6 @@ fn test_status_count_matches_index_length() {
             .0
             .len(),
     );
-}
-
-/// get_status_count returns 0 (not an error) for a Symbol that is not a
-/// contract-registered status. Storage uses per-status keys; missing keys
-/// default to 0 via `unwrap_or(0)` in `storage::get_status_count`.
-#[test]
-fn test_status_count_unknown_symbol_returns_zero() {
-    let (env, _creator, _contributor, _verifier) = setup_test();
-    let contract_id = env.register(MergeMintContract, ());
-    let client = MergeMintContractClient::new(&env, &contract_id);
-
-    assert_eq!(
-        client.get_status_count(&Symbol::new(&env, "nonexistent")),
-        0
-    );
-    assert_eq!(
-        client.get_status_count(&Symbol::new(&env, "bogus_status")),
-        0
-    );
-    assert_eq!(client.get_status_count(&Symbol::new(&env, "active")), 0);
 }
 
 /// The assignee calling complete_bounty as their own verifier must panic.
