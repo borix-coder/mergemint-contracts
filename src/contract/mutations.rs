@@ -155,6 +155,7 @@ impl MergeMintContract {
     /// * If `approval_threshold` exceeds `required_verifiers.len()` when set
     ///   (`ContractError::ApprovalThresholdExceedsVerifiers`).
     /// * If `reward_token` is not a valid Soroban token contract.
+    /// * If milestone reward summation overflows (`ContractError::RewardAmountOverflow`).
     /// * If `milestones` is non-empty and their rewards do not sum to `reward_amount`.
     ///
     /// # Authorization
@@ -201,7 +202,10 @@ impl MergeMintContract {
         if !milestones.is_empty() {
             let mut total: i128 = 0;
             for m in milestones.iter() {
-                total += m.reward;
+                total = match total.checked_add(m.reward) {
+                    Some(sum) => sum,
+                    None => fail(ContractError::RewardAmountOverflow),
+                };
             }
             if total != reward_amount {
                 fail(ContractError::MilestoneRewardsMismatch);

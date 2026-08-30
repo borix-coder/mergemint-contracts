@@ -37,6 +37,7 @@ pub enum ContractError {
     NotAllMilestonesCompleted,
     InvalidMilestoneIndex,
     MilestoneRewardsMismatch,
+    RewardAmountOverflow,
 }
 
 /// Convert a `ContractError` to its canonical panic message and panic.
@@ -81,5 +82,6 @@ pub const fn message(e: ContractError) -> &'static str {
         ContractError::NotAllMilestonesCompleted => "not all milestones are completed",
         ContractError::InvalidMilestoneIndex => "invalid milestone index",
         ContractError::MilestoneRewardsMismatch => "milestone rewards do not sum to reward_amount",
+        ContractError::RewardAmountOverflow => "reward amount arithmetic overflow",
     }
 }
