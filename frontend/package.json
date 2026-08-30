@@ -2,9 +2,14 @@
   "name": "mergemint-frontend",
   "private": true,
   "version": "0.0.0",
+  "type": "module",
   "scripts": {
     "test": "vitest run",
     "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "vitest": "^2.0.0",
