@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::contract::MergeMintContract;
+use crate::types::Milestone;
 use crate::MergeMintContractClient;
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
