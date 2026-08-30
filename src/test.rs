@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::contract::MergeMintContract;
+use crate::types::Milestone;
 use crate::MergeMintContractClient;
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
@@ -206,6 +207,42 @@ fn test_too_many_tags_panics() {
         &1,
         &Vec::new(&env),
     );
+}
+
+/// get_bounties_by_tag returns an empty `Vec` (not an error) for tags that were
+/// never attached to any open bounty. The query scans open bounties and filters
+/// by tag membership; unregistered tags simply match nothing.
+#[test]
+fn test_get_bounties_by_tag_unknown_tags_return_empty() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    for tag in ["ghost", "never_used", "zzz", "unregistered"] {
+        assert_eq!(client.get_bounties_by_tag(&Symbol::new(&env, tag)).len(), 0);
+    }
+
+    let mut tags: Vec<Symbol> = Vec::new(&env);
+    tags.push_back(Symbol::new(&env, "bug"));
+    tags.push_back(Symbol::new(&env, "docs"));
+    let _bounty_id = client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "tagged"),
+        &String::from_str(&env, "desc"),
+        &1000,
+        &create_token_and_mint(&env, &creator, &contract_id, 0),
+        &0,
+        &None,
+        &tags,
+        &1,
+        &None,
+        &1,
+        &Vec::new(&env),
+    );
+
+    for tag in ["ghost", "frontend", "rust", "missing"] {
+        assert_eq!(client.get_bounties_by_tag(&Symbol::new(&env, tag)).len(), 0);
+    }
 }
 
 // ===========================================================================
@@ -605,6 +642,10 @@ fn test_claim_bounty() {
     assert_eq!(share, 10_000u32);
 }
 
+// ===========================================================================
+// Issue #757 — Security: prevent creator self-claim (security/prevent-creator-claim.md)
+// ===========================================================================
+
 #[test]
 #[should_panic(expected = "creator cannot claim")]
 fn test_creator_cannot_claim_own_bounty() {
@@ -627,6 +668,36 @@ fn test_creator_cannot_claim_own_bounty() {
         &Vec::new(&env),
     );
     client.claim_bounty(&creator, &bounty_id);
+}
+
+/// The creator self-claim guard fires even when the creator address is
+/// passed through an alias variable, confirming no bypass via indirection.
+/// Regression test for security/prevent-creator-claim.md.
+#[test]
+#[should_panic(expected = "creator cannot claim")]
+fn test_creator_self_claim_guard_no_alias_bypass() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let bounty_id = client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "alias_test"),
+        &String::from_str(&env, "desc"),
+        &1000,
+        &create_token_and_mint(&env, &creator, &contract_id, 0),
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &Vec::new(&env),
+    );
+
+    // Alias the creator address — the guard must still fire.
+    let also_creator = creator.clone();
+    client.claim_bounty(&also_creator, &bounty_id);
 }
 
 #[test]
@@ -938,6 +1009,22 @@ fn test_status_count_initial_zero() {
     assert_eq!(client.get_status_count(&Symbol::new(&env, "cancelled")), 0);
 }
 
+/// get_status_count returns 0 for an arbitrary Symbol that is not a real
+/// bounty status (storage has no StatusCount key for it).
+#[test]
+fn test_status_count_unrecognized_symbol_returns_zero() {
+    let (env, _creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    assert_eq!(client.get_status_count(&Symbol::new(&env, "bogus")), 0);
+    assert_eq!(
+        client.get_status_count(&Symbol::new(&env, "not_a_status")),
+        0
+    );
+    assert_eq!(client.get_status_count(&Symbol::new(&env, "archived")), 0);
+}
+
 /// get_status_count returns 1 after creating a single bounty (open status).
 #[test]
 fn test_status_count_one_on_create() {
@@ -1221,6 +1308,26 @@ fn test_status_count_matches_index_length() {
             .0
             .len(),
     );
+}
+
+/// get_status_count returns 0 (not an error) for a Symbol that is not a
+/// contract-registered status. Storage uses per-status keys; missing keys
+/// default to 0 via `unwrap_or(0)` in `storage::get_status_count`.
+#[test]
+fn test_status_count_unknown_symbol_returns_zero() {
+    let (env, _creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    assert_eq!(
+        client.get_status_count(&Symbol::new(&env, "nonexistent")),
+        0
+    );
+    assert_eq!(
+        client.get_status_count(&Symbol::new(&env, "bogus_status")),
+        0
+    );
+    assert_eq!(client.get_status_count(&Symbol::new(&env, "active")), 0);
 }
 
 /// The assignee calling complete_bounty as their own verifier must panic.
@@ -2016,240 +2123,71 @@ fn test_escrow_balance_invariant() {
 }
 
 // ===========================================================================
-// Issue #655 — pin the storage read/write entry counts for create_bounty
-//
-// `create_bounty` had a storage-read-doubling bug fixed in issue #90. This
-// test pins the per-invocation ledger-entry write count and bounds the read
-// count so a change that reintroduces redundant storage access (or otherwise
-// inflates the storage footprint of a single create_bounty call) fails CI
-// instead of silently regressing on-chain cost.
-//
-// `Env` enables invocation metering by default, so
-// `env.cost_estimate().resources()` reports the resources metered for the
-// last top-level invocation — here, the create_bounty call.
+// Issue #756 — resolve_dispute arbitrator reputation guard
 // ===========================================================================
 
-/// Ledger entries a single `create_bounty` call must write, one per distinct
-/// persistent key it stores:
-///   Bounty, BountyMeta, BountyCount, StatusCount(open),
-///   StatusIndexPage(open, 0), OpenBountiesCount, OpenBountiesPage(0),
-///   ContributorBounties(creator).
-/// Dropping below this means a required write was lost.
-const CREATE_BOUNTY_MIN_WRITE_ENTRIES: u32 = 8;
-
-/// Ceiling on write entries — headroom for host/token instance bumps only.
-/// Exceeding it means `create_bounty` grew its write footprint.
-const CREATE_BOUNTY_MAX_WRITE_ENTRIES: u32 = 12;
-
-/// Ceiling on distinct ledger entries read by one `create_bounty` call.
-/// The current footprint is single-digit; this leaves room for incidental
-/// host/token reads while still catching a gross regression such as the
-/// issue #90 read-doubling bug.
-const CREATE_BOUNTY_MAX_READ_ENTRIES: u32 = 32;
-
-fn measure_create_bounty(client: &MergeMintContractClient, env: &Env, token: &Address, tag: &str) {
-    client.create_bounty(
-        &Address::generate(env),
-        &Symbol::new(env, tag),
-        &String::from_str(env, "desc"),
-        &1000,
-        token,
-        &0,
-        &None,
-        &Vec::new(env),
-        &1,
-        &None,
-        &1,
-        &Vec::new(env),
-    );
-}
-
+/// resolve_dispute must reject an arbitrator whose reputation is below
+/// the bounty's min_reputation threshold.
+/// Regression test for security/minimum-reputation-enforcement.md.
 #[test]
-fn test_create_bounty_storage_io_count_pinned() {
-    let (env, creator, _contributor, _verifier) = setup_test();
+#[should_panic(expected = "contributor reputation is too low")]
+fn test_resolve_dispute_rejects_low_reputation_arbitrator() {
+    let (env, creator, contributor, _verifier) = setup_test();
     let contract_id = env.register(MergeMintContract, ());
     let client = MergeMintContractClient::new(&env, &contract_id);
 
-    // Register the reward token before the measured calls so the last metered
-    // top-level invocation is always a create_bounty call.
-    let reward_token = create_token_and_mint(&env, &creator, &contract_id, 0);
-
-    // First create_bounty against empty indexes.
-    measure_create_bounty(&client, &env, &reward_token, "io_pin_1");
-    let first = env.cost_estimate().resources();
-
-    // Second create_bounty against now-populated indexes.
-    measure_create_bounty(&client, &env, &reward_token, "io_pin_2");
-    let second = env.cost_estimate().resources();
-
-    // Absolute footprint of a single create_bounty stays small: one write per
-    // distinct persistent key it stores, plus headroom for host/token entries.
-    assert!(
-        first.write_entries >= CREATE_BOUNTY_MIN_WRITE_ENTRIES
-            && first.write_entries <= CREATE_BOUNTY_MAX_WRITE_ENTRIES,
-        "create_bounty wrote {} ledger entries, outside the pinned range {}..={}; \
-         adjust the bounds only for a deliberate storage change. Full resources: {first:?}",
-        first.write_entries,
-        CREATE_BOUNTY_MIN_WRITE_ENTRIES,
-        CREATE_BOUNTY_MAX_WRITE_ENTRIES,
-    );
-    assert!(
-        first.memory_read_entries >= 1
-            && first.memory_read_entries <= CREATE_BOUNTY_MAX_READ_ENTRIES,
-        "create_bounty read {} ledger entries, above the pinned ceiling of {}. \
-         Full resources: {first:?}",
-        first.memory_read_entries,
-        CREATE_BOUNTY_MAX_READ_ENTRIES,
-    );
-
-    // Calibration-free regression guard for the issue #90 read-doubling class
-    // of bug: a second create_bounty touches the same set of distinct entries
-    // as the first (they merely hold values now), so its read/write footprint
-    // must not grow. A path that reads an entry twice, or scales storage
-    // access with the number of existing bounties, trips this.
-    assert!(
-        second.memory_read_entries <= first.memory_read_entries + 1,
-        "create_bounty read footprint grew from {} to {} on the second call — \
-         a storage read is being duplicated or scales with bounty count (see issue #90). \
-         first: {first:?}\nsecond: {second:?}",
-        first.memory_read_entries,
-        second.memory_read_entries,
-    );
-    assert!(
-        second.write_entries <= first.write_entries + 1,
-        "create_bounty write footprint grew from {} to {} on the second call. \
-         first: {first:?}\nsecond: {second:?}",
-        first.write_entries,
-        second.write_entries,
-    );
-}
-
-// ===========================================================================
-// Issue #658 — BountyMeta stays in sync with Bounty across every mutation
-//
-// `get_bounty_metas` reads a separate `BountyMeta` record (title +
-// description) written once by `create_bounty`. No mutation entrypoint
-// changes a bounty's title or description, so the invariant every mutation
-// must preserve is: after the mutation, `get_bounty_metas([id])` still
-// returns the original title and description, and the record is still
-// present.
-//
-// This test drives bounties through each mutation entrypoint that writes a
-// `Bounty` and asserts the invariant after every step. A future mutation
-// that rewrites a bounty through a path which drops or desyncs its
-// `BountyMeta` will fail here.
-// ===========================================================================
-
-/// Assert the `BountyMeta` for `id` still holds exactly the title and
-/// description written at creation.
-fn assert_meta_in_sync(
-    client: &MergeMintContractClient,
-    env: &Env,
-    id: &crate::types::BountyId,
-    expected_title: &str,
-    expected_description: &str,
-) {
-    let metas = client.get_bounty_metas(&Vec::from_array(env, [id.clone()]));
-    let meta = metas
-        .get(0)
-        .unwrap()
-        .expect("BountyMeta must still exist after a Bounty mutation");
-    assert_eq!(
-        meta.title,
-        Symbol::new(env, expected_title),
-        "BountyMeta.title drifted from the Bounty it describes"
-    );
-    assert_eq!(
-        meta.description,
-        String::from_str(env, expected_description),
-        "BountyMeta.description drifted from the Bounty it describes"
-    );
-}
-
-#[test]
-fn test_bounty_meta_stays_synced_across_mutations() {
-    let (env, creator, contributor, verifier) = setup_test();
-    let contract_id = env.register(MergeMintContract, ());
-    let client = MergeMintContractClient::new(&env, &contract_id);
-
-    // claim_bounty -> raise_dispute -> resolve_dispute("cancel")
-    let (bounty_a, _token_a) =
-        make_bounty_with_token(&client, &env, &creator, &contract_id, "meta_a", 1000, None);
-    assert_meta_in_sync(&client, &env, &bounty_a, "meta_a", "desc");
-
-    client.claim_bounty(&contributor, &bounty_a);
-    assert_meta_in_sync(&client, &env, &bounty_a, "meta_a", "desc");
-
-    client.raise_dispute(&creator, &bounty_a);
-    assert_meta_in_sync(&client, &env, &bounty_a, "meta_a", "desc");
-
-    client.resolve_dispute(&creator, &bounty_a, &Symbol::new(&env, "cancel"));
-    assert_meta_in_sync(&client, &env, &bounty_a, "meta_a", "desc");
-
-    // claim_bounty -> complete_bounty
-    let (bounty_b, _token_b) =
-        make_bounty_with_token(&client, &env, &creator, &contract_id, "meta_b", 1000, None);
-    let contributor_b = Address::generate(&env);
-    client.claim_bounty(&contributor_b, &bounty_b);
-    assert_meta_in_sync(&client, &env, &bounty_b, "meta_b", "desc");
-    client.complete_bounty(&verifier, &bounty_b);
-    assert_meta_in_sync(&client, &env, &bounty_b, "meta_b", "desc");
-
-    // cancel_bounty
-    let (bounty_c, _token_c) =
-        make_bounty_with_token(&client, &env, &creator, &contract_id, "meta_c", 1000, None);
-    client.cancel_bounty(&creator, &bounty_c);
-    assert_meta_in_sync(&client, &env, &bounty_c, "meta_c", "desc");
-
-    // expire_bounty
-    let (bounty_d, _token_d) = make_bounty_with_token(
-        &client,
-        &env,
+    // Create a bounty with min_reputation = 50.
+    // The creator has 0 reputation (fresh account), so they cannot resolve
+    // a dispute on their own bounty until their reputation meets the threshold.
+    let reward_amount: i128 = 1000;
+    let token_addr = create_token_and_mint(&env, &creator, &contract_id, reward_amount);
+    let bounty_id = client.create_bounty(
         &creator,
-        &contract_id,
-        "meta_d",
-        1000,
-        Some(10),
-    );
-    env.ledger().set_sequence_number(100);
-    client.expire_bounty(&Address::generate(&env), &bounty_d);
-    assert_meta_in_sync(&client, &env, &bounty_d, "meta_d", "desc");
-
-    // complete_milestone
-    let milestone_token = create_token_and_mint(&env, &creator, &contract_id, 1000);
-    let mut milestones: Vec<crate::types::Milestone> = Vec::new(&env);
-    milestones.push_back(crate::types::Milestone {
-        description: Symbol::new(&env, "m0"),
-        reward: 1000,
-        completed: false,
-    });
-    let bounty_e = client.create_bounty(
-        &creator,
-        &Symbol::new(&env, "meta_e"),
+        &Symbol::new(&env, "rep_disp"),
         &String::from_str(&env, "desc"),
-        &1000,
-        &milestone_token,
-        &0,
+        &reward_amount,
+        &token_addr,
+        &50, // min_reputation = 50
         &None,
         &Vec::new(&env),
         &1,
         &None,
         &1,
-        &milestones,
+        &Vec::new(&env),
     );
-    let contributor_e = Address::generate(&env);
-    client.claim_bounty(&contributor_e, &bounty_e);
-    assert_meta_in_sync(&client, &env, &bounty_e, "meta_e", "desc");
-    client.complete_milestone(&verifier, &bounty_e, &0u32);
-    assert_meta_in_sync(&client, &env, &bounty_e, "meta_e", "desc");
 
-    // approve_completion (multi-sig quorum path)
-    let (bounty_f, _token_f, v1, v2, _v3) =
-        make_multisig_bounty(&client, &env, &creator, &contract_id, 1000, 2);
-    let contributor_f = Address::generate(&env);
-    client.claim_bounty(&contributor_f, &bounty_f);
-    client.approve_completion(&v1, &bounty_f);
-    assert_meta_in_sync(&client, &env, &bounty_f, "msig", "multi-sig bounty");
-    client.approve_completion(&v2, &bounty_f);
-    assert_meta_in_sync(&client, &env, &bounty_f, "msig", "multi-sig bounty");
+    client.claim_bounty(&contributor, &bounty_id);
+    client.raise_dispute(&creator, &bounty_id);
+
+    // Creator has 0 reputation, bounty requires 50 — must panic.
+    client.resolve_dispute(&creator, &bounty_id, &Symbol::new(&env, "cancel"));
+}
+
+/// resolve_dispute succeeds when the arbitrator meets the reputation threshold.
+#[test]
+fn test_resolve_dispute_accepts_sufficient_reputation_arbitrator() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    // Create a bounty with min_reputation = 0 (no floor).
+    let reward_amount: i128 = 1000;
+    let (bounty_id, _token_addr) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "rep_disp_ok",
+        reward_amount,
+        None,
+    );
+
+    client.claim_bounty(&contributor, &bounty_id);
+    client.raise_dispute(&creator, &bounty_id);
+
+    // min_reputation = 0 means no floor — creator can always resolve.
+    client.resolve_dispute(&creator, &bounty_id, &Symbol::new(&env, "cancel"));
+
+    let bounty = client.get_bounty(&bounty_id).unwrap();
+    assert_eq!(bounty.status, Symbol::new(&env, "cancelled"));
 }

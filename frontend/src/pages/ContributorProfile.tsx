@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { Contributor } from '../types';
-import { mapErrorMessage } from '../lib/format';
+import { mapErrorMessage } from '../utils/format';
 
 export function ContributorProfile() {
   const { address } = useParams<{ address: string }>();
