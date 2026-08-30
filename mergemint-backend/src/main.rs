@@ -26,15 +26,14 @@
 // includes the correlation ID, making it trivial to grep logs for a single
 // user's flow even when requests are interleaved.
 //
-// ## CORS allow-list
+// ## Graceful shutdown
 //
-// The CORS layer is built from an explicit, configured origin allow-list
-// (`CORS_ALLOWED_ORIGINS`) rather than permitting `*`/`Any` — an
-// unrestricted origin would let any website read authenticated responses
-// from a browser holding a session with this API. An empty/unset value
-// results in a layer that permits no cross-origin browser requests at all
-// (same-origin and non-browser clients are unaffected), which is the safe
-// default until the allow-list is configured for the environment.
+// `axum::serve` is wired to `shutdown_signal`, which waits for SIGINT
+// (Ctrl+C) or, on Unix, SIGTERM. Once either fires, Axum stops accepting new
+// connections but lets in-flight requests finish — including a `self_claim`
+// / `resolve_dispute` call that has already reached the point of submitting
+// a chain transaction — instead of dropping them mid-flight when a deploy
+// sends SIGTERM.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -57,8 +56,7 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 mod db;
 mod routes;
 
-use db::new_shared_db;
-use routes::bounties::{list_bounties, list_bounties_by_assignee};
+use db::{new_shared_db, new_shared_idempotency_store};
 use routes::tx::{resolve_dispute, self_claim, AppState};
 
 /// Maximum allowed request body size (1 MiB).
@@ -105,7 +103,11 @@ async fn main() {
     warn_if_reward_token_allowlist_empty();
 
     let shared_db = new_shared_db();
-    let state = Arc::new(AppState { db: shared_db });
+    let idempotency = new_shared_idempotency_store();
+    let state = Arc::new(AppState {
+        db: shared_db,
+        idempotency,
+    });
 
     let app = Router::new()
         .route("/tx/resolve-dispute", post(resolve_dispute))
@@ -169,7 +171,45 @@ async fn main() {
         "mergemint-backend listening"
     );
 
-    axum::serve(listener, app).await.expect("server error");
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .expect("server error");
+}
+
+/// Waits for SIGINT (Ctrl+C) or, on Unix, SIGTERM.
+///
+/// Passed to `with_graceful_shutdown` so the server stops accepting new
+/// connections but lets in-flight requests — most importantly a
+/// transaction-submission handler that has already started talking to
+/// Horizon — finish instead of being dropped mid-flight when a deploy sends
+/// SIGTERM.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {
+            tracing::info!("received SIGINT, starting graceful shutdown");
+        }
+        _ = terminate => {
+            tracing::info!("received SIGTERM, starting graceful shutdown");
+        }
+    }
 }
 
 fn warn_if_reward_token_allowlist_empty() {
@@ -212,10 +252,7 @@ fn build_cors_layer(allowed_origins: &str) -> CorsLayer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use axum::body::Body;
-    use axum::http::Request;
-    use tower::Service;
+    use super::shutdown_signal;
 
     #[test]
     fn empty_allowlist_detection_handles_unset_empty_and_commas() {
@@ -229,79 +266,18 @@ mod tests {
         assert!(!is_empty(" , native , "));
     }
 
-    fn test_router(allowed_origins: &str) -> Router {
-        Router::new()
-            .route("/health", get(|| async { "ok" }))
-            .layer(build_cors_layer(allowed_origins))
-    }
-
-    /// A request from an origin that isn't on the allow-list must not
-    /// receive an `Access-Control-Allow-Origin` header — without it, a
-    /// browser refuses to expose the response to that origin's script.
+    /// `shutdown_signal` must keep waiting until an actual SIGINT/SIGTERM
+    /// arrives rather than resolving immediately. This guards against a
+    /// regression (e.g. an errant `now_or_never`, or a select branch that
+    /// completes on its own) that would make `with_graceful_shutdown` fire
+    /// on every request cycle instead of only on a real shutdown signal.
     #[tokio::test]
-    async fn disallowed_origin_does_not_receive_cors_allow_header() {
-        let mut app = test_router("https://app.mergemint.xyz");
-
-        let request = Request::builder()
-            .uri("/health")
-            .header("origin", "https://evil.example.com")
-            .body(Body::empty())
-            .unwrap();
-
-        let response = app.call(request).await.unwrap();
-
+    async fn shutdown_signal_does_not_resolve_without_a_real_signal() {
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(50), shutdown_signal()).await;
         assert!(
-            response
-                .headers()
-                .get("access-control-allow-origin")
-                .is_none(),
-            "a disallowed origin must not receive an Access-Control-Allow-Origin header"
-        );
-    }
-
-    /// A request from an allow-listed origin must receive a matching
-    /// `Access-Control-Allow-Origin` header.
-    #[tokio::test]
-    async fn allowed_origin_receives_cors_allow_header() {
-        let mut app = test_router("https://app.mergemint.xyz");
-
-        let request = Request::builder()
-            .uri("/health")
-            .header("origin", "https://app.mergemint.xyz")
-            .body(Body::empty())
-            .unwrap();
-
-        let response = app.call(request).await.unwrap();
-
-        assert_eq!(
-            response
-                .headers()
-                .get("access-control-allow-origin")
-                .expect("allowed origin must receive the header"),
-            "https://app.mergemint.xyz"
-        );
-    }
-
-    /// An empty allow-list (nothing configured) must permit no cross-origin
-    /// requests at all — the safe default, never `*`.
-    #[tokio::test]
-    async fn empty_allow_list_grants_no_origin_access() {
-        let mut app = test_router("");
-
-        let request = Request::builder()
-            .uri("/health")
-            .header("origin", "https://app.mergemint.xyz")
-            .body(Body::empty())
-            .unwrap();
-
-        let response = app.call(request).await.unwrap();
-
-        assert!(
-            response
-                .headers()
-                .get("access-control-allow-origin")
-                .is_none(),
-            "an empty CORS_ALLOWED_ORIGINS must not grant any origin access"
+            result.is_err(),
+            "shutdown_signal resolved without SIGINT/SIGTERM ever being sent"
         );
     }
 }

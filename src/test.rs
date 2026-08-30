@@ -605,6 +605,10 @@ fn test_claim_bounty() {
     assert_eq!(share, 10_000u32);
 }
 
+// ===========================================================================
+// Issue #757 — Security: prevent creator self-claim (security/prevent-creator-claim.md)
+// ===========================================================================
+
 #[test]
 #[should_panic(expected = "creator cannot claim")]
 fn test_creator_cannot_claim_own_bounty() {
@@ -627,6 +631,36 @@ fn test_creator_cannot_claim_own_bounty() {
         &Vec::new(&env),
     );
     client.claim_bounty(&creator, &bounty_id);
+}
+
+/// The creator self-claim guard fires even when the creator address is
+/// passed through an alias variable, confirming no bypass via indirection.
+/// Regression test for security/prevent-creator-claim.md.
+#[test]
+#[should_panic(expected = "creator cannot claim")]
+fn test_creator_self_claim_guard_no_alias_bypass() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let bounty_id = client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "alias_test"),
+        &String::from_str(&env, "desc"),
+        &1000,
+        &create_token_and_mint(&env, &creator, &contract_id, 0),
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &Vec::new(&env),
+    );
+
+    // Alias the creator address — the guard must still fire.
+    let also_creator = creator.clone();
+    client.claim_bounty(&also_creator, &bounty_id);
 }
 
 #[test]
@@ -2013,4 +2047,74 @@ fn test_escrow_balance_invariant() {
         expected_balance(0, 0),
         "after complete b3: contract balance must be zero"
     );
+}
+
+// ===========================================================================
+// Issue #756 — resolve_dispute arbitrator reputation guard
+// ===========================================================================
+
+/// resolve_dispute must reject an arbitrator whose reputation is below
+/// the bounty's min_reputation threshold.
+/// Regression test for security/minimum-reputation-enforcement.md.
+#[test]
+#[should_panic(expected = "contributor reputation is too low")]
+fn test_resolve_dispute_rejects_low_reputation_arbitrator() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    // Create a bounty with min_reputation = 50.
+    // The creator has 0 reputation (fresh account), so they cannot resolve
+    // a dispute on their own bounty until their reputation meets the threshold.
+    let reward_amount: i128 = 1000;
+    let token_addr = create_token_and_mint(&env, &creator, &contract_id, reward_amount);
+    let bounty_id = client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "rep_disp"),
+        &String::from_str(&env, "desc"),
+        &reward_amount,
+        &token_addr,
+        &50, // min_reputation = 50
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &Vec::new(&env),
+    );
+
+    client.claim_bounty(&contributor, &bounty_id);
+    client.raise_dispute(&creator, &bounty_id);
+
+    // Creator has 0 reputation, bounty requires 50 — must panic.
+    client.resolve_dispute(&creator, &bounty_id, &Symbol::new(&env, "cancel"));
+}
+
+/// resolve_dispute succeeds when the arbitrator meets the reputation threshold.
+#[test]
+fn test_resolve_dispute_accepts_sufficient_reputation_arbitrator() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    // Create a bounty with min_reputation = 0 (no floor).
+    let reward_amount: i128 = 1000;
+    let (bounty_id, _token_addr) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "rep_disp_ok",
+        reward_amount,
+        None,
+    );
+
+    client.claim_bounty(&contributor, &bounty_id);
+    client.raise_dispute(&creator, &bounty_id);
+
+    // min_reputation = 0 means no floor — creator can always resolve.
+    client.resolve_dispute(&creator, &bounty_id, &Symbol::new(&env, "cancel"));
+
+    let bounty = client.get_bounty(&bounty_id).unwrap();
+    assert_eq!(bounty.status, Symbol::new(&env, "cancelled"));
 }

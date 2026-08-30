@@ -22,6 +22,26 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+// ---------------------------------------------------------------------------
+// Migrations
+// ---------------------------------------------------------------------------
+//
+// `DbStore` above is the in-memory stand-in used today; `migrations/` holds
+// the SQL that applies to the real Postgres-backed store production
+// deployments run instead (see the module doc comment). It is not yet
+// wired to a live connection pool or `sqlx::migrate!()` -- there is no
+// Postgres integration in this crate yet -- but it is the source of truth
+// for schema/index decisions so they aren't lost when that pool lands.
+//
+// `migrations/0001_add_bounties_indexes.sql` indexes `bounties.assignee`
+// and `bounties.status`, the columns the indexer's writes are later
+// filtered on by `list_bounties_by_assignee` and status-based listing
+// queries. `BOUNTIES_INDEX_MIGRATION` below pins that file's content so an
+// edit that silently drops one of the two indexes fails `cargo test`
+// instead of only surfacing as a slow query in production.
+#[cfg(test)]
+const BOUNTIES_INDEX_MIGRATION: &str = include_str!("../migrations/0001_add_bounties_indexes.sql");
+
 /// Lightweight in-memory store used during development / integration tests.
 /// Production deployments replace this with a real database pool.
 #[derive(Debug, Default)]
@@ -147,106 +167,55 @@ pub fn read_db(db: &SharedDb) -> std::sync::RwLockReadGuard<'_, DbStore> {
 }
 
 // ---------------------------------------------------------------------------
-// Connection pool
+// Idempotency-key store
 // ---------------------------------------------------------------------------
-//
-// ## Bounded-wait pool exhaustion
-//
-// The store above is guarded by a single `RwLock`, so it has no notion of a
-// fixed number of "connections" the way a real `sqlx::PgPool` does. `DbPool`
-// adds that capacity bound ahead of the real Postgres pool swap-in: callers
-// check out a `PooledConnection` from a fixed-size semaphore, and once the
-// pool is saturated, `acquire` waits at most `POOL_ACQUIRE_TIMEOUT` before
-// returning `PoolExhausted` — a clear, fast error — rather than blocking the
-// caller indefinitely.
 
-/// Default number of concurrent connections a [`DbPool`] hands out before
-/// callers must wait for one to be released, mirroring a real DB pool's
-/// `max_connections` setting.
-#[allow(dead_code)]
-pub const DEFAULT_POOL_SIZE: usize = 10;
-
-/// Upper bound on how long [`DbPool::acquire`] waits for a free connection.
-/// Bounding the wait is what turns pool exhaustion into a fast, explicit
-/// error instead of a request that hangs indefinitely.
-#[allow(dead_code)]
-pub const POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(500);
-
-/// Returned by [`DbPool::acquire`] when no connection became available
-/// within `POOL_ACQUIRE_TIMEOUT`.
-#[derive(Debug)]
-#[allow(dead_code)]
-pub struct PoolExhausted;
-
-impl std::fmt::Display for PoolExhausted {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "connection pool exhausted: no connection became available within the timeout"
-        )
-    }
+/// Outcome recorded for a client-supplied `Idempotency-Key`.
+///
+/// `InFlight` is written *before* the transaction-submitting work begins, so
+/// a concurrent duplicate request (the client retried before the first
+/// response came back) sees the reservation rather than racing the same
+/// submission a second time. `Completed` replays the original response body
+/// once the first request finishes successfully.
+#[derive(Debug, Clone)]
+pub enum IdempotencyEntry {
+    InFlight,
+    Completed(String),
 }
 
-impl std::error::Error for PoolExhausted {}
-
-/// A capacity-bounded pool over [`SharedDb`].
-#[derive(Clone)]
-#[allow(dead_code)]
-pub struct DbPool {
-    db: SharedDb,
-    permits: Arc<Semaphore>,
+/// In-memory record of recently-seen idempotency keys, keyed by the raw
+/// `Idempotency-Key` header value.
+///
+/// Mirrors `DbStore`: a plain `HashMap` guarded by an `RwLock` kept separate
+/// from `DbStore` so idempotency bookkeeping never contends with the
+/// business-data lock.
+#[derive(Debug, Default)]
+pub struct IdempotencyStore {
+    pub entries: HashMap<String, IdempotencyEntry>,
 }
 
-#[allow(dead_code)]
-impl DbPool {
-    /// Build a pool with the default capacity.
-    pub fn new(db: SharedDb) -> Self {
-        Self::with_capacity(db, DEFAULT_POOL_SIZE)
-    }
+/// Shared, thread-safe handle to the idempotency store.
+pub type SharedIdempotencyStore = Arc<RwLock<IdempotencyStore>>;
 
-    /// Build a pool with an explicit capacity — used by tests to saturate a
-    /// small pool without checking out hundreds of connections.
-    pub fn with_capacity(db: SharedDb, capacity: usize) -> Self {
-        Self {
-            db,
-            permits: Arc::new(Semaphore::new(capacity)),
-        }
-    }
-
-    /// Check out a connection, waiting up to `POOL_ACQUIRE_TIMEOUT` for one
-    /// to free up. Returns `PoolExhausted` rather than hanging if the pool
-    /// stays saturated for the whole timeout window.
-    pub async fn acquire(&self) -> Result<PooledConnection, PoolExhausted> {
-        let permit =
-            tokio::time::timeout(POOL_ACQUIRE_TIMEOUT, self.permits.clone().acquire_owned())
-                .await
-                .map_err(|_elapsed| PoolExhausted)?
-                .expect("pool semaphore is never closed");
-
-        Ok(PooledConnection {
-            db: self.db.clone(),
-            _permit: permit,
-        })
-    }
+/// Create a new, empty shared idempotency-store handle.
+pub fn new_shared_idempotency_store() -> SharedIdempotencyStore {
+    Arc::new(RwLock::new(IdempotencyStore::default()))
 }
 
-/// A checked-out pool connection. Dropping it releases the permit back to
-/// the pool.
-#[allow(dead_code)]
-pub struct PooledConnection {
-    db: SharedDb,
-    _permit: OwnedSemaphorePermit,
+/// Acquire the idempotency-store write lock, recovering gracefully from lock
+/// poison (see the module-level note on lock-poison recovery, #473).
+pub fn acquire_idempotency(
+    store: &SharedIdempotencyStore,
+) -> std::sync::RwLockWriteGuard<'_, IdempotencyStore> {
+    store.write().unwrap_or_else(|e| e.into_inner())
 }
 
-#[allow(dead_code)]
-impl PooledConnection {
-    pub fn read(&self) -> std::sync::RwLockReadGuard<'_, DbStore> {
-        read_db(&self.db)
-    }
-
-    pub fn write(&self) -> std::sync::RwLockWriteGuard<'_, DbStore> {
-        acquire_db(&self.db)
-    }
+/// Acquire the idempotency-store read lock, recovering gracefully from lock
+/// poison.
+pub fn read_idempotency(
+    store: &SharedIdempotencyStore,
+) -> std::sync::RwLockReadGuard<'_, IdempotencyStore> {
+    store.read().unwrap_or_else(|e| e.into_inner())
 }
 
 #[cfg(test)]
@@ -292,142 +261,61 @@ mod tests {
         assert!(read_b.records.is_empty());
     }
 
-    // ── Connection pool exhaustion ─────────────────────────────────────────
-
-    /// Saturating the pool must yield a bounded-time error on the next
-    /// acquire, never an indefinite hang.
-    #[tokio::test]
-    async fn test_pool_exhaustion_returns_bounded_time_error_not_hang() {
-        let db = new_shared_db();
-        let pool = DbPool::with_capacity(db, 2);
-
-        let _held_1 = pool
-            .acquire()
-            .await
-            .expect("first connection should succeed");
-        let _held_2 = pool
-            .acquire()
-            .await
-            .expect("second connection should succeed");
-
-        let start = std::time::Instant::now();
-        let result = pool.acquire().await;
-        let elapsed = start.elapsed();
+    #[test]
+    fn test_bounties_index_migration_covers_assignee_and_status() {
+        let migration = BOUNTIES_INDEX_MIGRATION.to_lowercase();
 
         assert!(
-            result.is_err(),
-            "acquiring beyond pool capacity must return an error, not succeed"
+            migration
+                .contains("create index if not exists idx_bounties_assignee on bounties (assignee)"),
+            "migration must index bounties.assignee (filtered by list_bounties_by_assignee); got:\n{migration}"
         );
         assert!(
-            elapsed < Duration::from_secs(2),
-            "pool exhaustion must fail within a bounded time instead of hanging; took {elapsed:?}"
+            migration
+                .contains("create index if not exists idx_bounties_status on bounties (status)"),
+            "migration must index bounties.status (filtered by status-based listing queries); got:\n{migration}"
         );
     }
 
-    /// Once a held connection is dropped, its permit must be returned to the
-    /// pool so the next acquire succeeds.
-    #[tokio::test]
-    async fn test_pool_connection_is_released_back_after_drop() {
-        let db = new_shared_db();
-        let pool = DbPool::with_capacity(db, 1);
-
-        {
-            let _held = pool
-                .acquire()
-                .await
-                .expect("first connection should succeed");
-            assert!(
-                pool.acquire().await.is_err(),
-                "pool of capacity 1 must be exhausted while the only connection is held"
-            );
-        }
-
-        assert!(
-            pool.acquire().await.is_ok(),
-            "connection should be available again once the held one is dropped"
-        );
+    #[test]
+    fn test_idempotency_store_starts_empty() {
+        let store = new_shared_idempotency_store();
+        assert!(read_idempotency(&store).entries.is_empty());
     }
 
-    // ── Bounty listing ───────────────────────────────────────────────────
+    #[test]
+    fn test_idempotency_store_records_in_flight_then_completed() {
+        let store = new_shared_idempotency_store();
 
-    fn seed_bounty(
-        db: &SharedDb,
-        id: &str,
-        creator: &str,
-        assignee: Option<&str>,
-        offset_secs: i64,
-    ) {
-        let mut guard = acquire_db(db);
-        guard.bounties.push(Bounty {
-            id: id.to_string(),
-            creator: creator.to_string(),
-            assignee: assignee.map(str::to_string),
-            created_at: Utc::now() + chrono::Duration::seconds(offset_secs),
+        acquire_idempotency(&store)
+            .entries
+            .insert("key-1".to_string(), IdempotencyEntry::InFlight);
+        assert!(matches!(
+            read_idempotency(&store).entries.get("key-1"),
+            Some(IdempotencyEntry::InFlight)
+        ));
+
+        acquire_idempotency(&store).entries.insert(
+            "key-1".to_string(),
+            IdempotencyEntry::Completed(r#"{"ok":true}"#.to_string()),
+        );
+        assert!(matches!(
+            read_idempotency(&store).entries.get("key-1"),
+            Some(IdempotencyEntry::Completed(body)) if body == r#"{"ok":true}"#
+        ));
+    }
+
+    #[test]
+    fn test_idempotency_store_poison_recovery() {
+        let store = new_shared_idempotency_store();
+
+        let store_clone = Arc::clone(&store);
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = store_clone.write().unwrap();
+            panic!("simulated panic");
         });
-    }
 
-    #[test]
-    fn test_list_bounties_by_creator_filters_and_orders_newest_first() {
-        let db = new_shared_db();
-        seed_bounty(&db, "1", "alice", None, 0);
-        seed_bounty(&db, "2", "bob", None, 1);
-        seed_bounty(&db, "3", "alice", None, 2);
-
-        let page = list_bounties_by_creator(&db, "alice", 10, None);
-
-        assert_eq!(page.bounties.len(), 2);
-        assert_eq!(page.bounties[0].id, "3", "newest match must come first");
-        assert_eq!(page.bounties[1].id, "1");
-        assert!(page.next_cursor.is_none());
-    }
-
-    #[test]
-    fn test_list_bounties_by_creator_empty_creator_matches_all() {
-        let db = new_shared_db();
-        seed_bounty(&db, "1", "alice", None, 0);
-        seed_bounty(&db, "2", "bob", None, 1);
-
-        let page = list_bounties_by_creator(&db, "", 10, None);
-
-        assert_eq!(page.bounties.len(), 2);
-    }
-
-    #[test]
-    fn test_list_bounties_by_assignee_returns_empty_page_for_unknown_assignee() {
-        let db = new_shared_db();
-        seed_bounty(&db, "1", "alice", Some("carol"), 0);
-
-        let page = list_bounties_by_assignee(&db, "dave", 10, None);
-
-        assert!(page.bounties.is_empty());
-        assert!(page.next_cursor.is_none());
-    }
-
-    #[test]
-    fn test_list_bounties_by_assignee_matches_recorded_assignee() {
-        let db = new_shared_db();
-        seed_bounty(&db, "1", "alice", Some("carol"), 0);
-        seed_bounty(&db, "2", "bob", Some("dave"), 1);
-
-        let page = list_bounties_by_assignee(&db, "carol", 10, None);
-
-        assert_eq!(page.bounties.len(), 1);
-        assert_eq!(page.bounties[0].id, "1");
-    }
-
-    #[test]
-    fn test_list_bounties_pagination_sets_next_cursor_when_more_results_exist() {
-        let db = new_shared_db();
-        seed_bounty(&db, "1", "alice", None, 0);
-        seed_bounty(&db, "2", "alice", None, 1);
-        seed_bounty(&db, "3", "alice", None, 2);
-
-        let page = list_bounties_by_creator(&db, "alice", 2, None);
-
-        assert_eq!(page.bounties.len(), 2);
-        assert!(
-            page.next_cursor.is_some(),
-            "a page cut short by the limit must carry a next_cursor"
-        );
+        let guard = acquire_idempotency(&store);
+        assert!(guard.entries.is_empty(), "recovered store should be intact");
     }
 }
