@@ -46,6 +46,7 @@ fn paginate(
 
 #[contractimpl]
 impl MergeMintContract {
+    /// Return a single bounty by its ID, or `None` if it does not exist.
     pub fn get_bounty(env: Env, bounty_id: BountyId) -> Option<Bounty> {
         // Never-allocated IDs (sequence >= count) and pruned entries (sequence
         // < count but missing from storage) both return None without panicking.
@@ -55,6 +56,8 @@ impl MergeMintContract {
         storage::get_bounty(&env, &bounty_id)
     }
 
+    /// Return the off-chain-facing metadata (title, description) for each of
+    /// `ids`, in the same order. Entries are `None` for IDs with no stored meta.
     pub fn get_bounty_metas(env: Env, ids: Vec<BountyId>) -> Vec<Option<BountyMeta>> {
         let mut result: Vec<Option<BountyMeta>> = Vec::new(&env);
         for id in ids.iter() {
@@ -63,6 +66,8 @@ impl MergeMintContract {
         result
     }
 
+    /// Return a contributor's profile (reputation, earnings, active claims),
+    /// or `None` if `address` has never interacted with the contract.
     pub fn get_contributor(env: Env, address: Address) -> Option<Contributor> {
         storage::get_contributor(&env, &address)
     }
@@ -76,6 +81,8 @@ impl MergeMintContract {
         storage::get_bounty_count(&env)
     }
 
+    /// Return each bounty in `ids`, in the same order. Entries are `None`
+    /// for IDs that do not exist.
     pub fn get_bounties(env: Env, ids: Vec<BountyId>) -> Vec<Option<Bounty>> {
         let mut result = Vec::new(&env);
         for id in ids.iter() {
@@ -103,6 +110,7 @@ impl MergeMintContract {
         paginate(&env, all, cursor, limit)
     }
 
+    /// Return the total number of bounties currently in `status`.
     pub fn get_status_count(env: Env, status: Symbol) -> u32 {
         crate::symbols::validate_symbol_or_fail(&env, crate::symbols::SymbolKind::Status, &status);
         storage::get_status_count(&env, &status)
@@ -178,6 +186,19 @@ impl MergeMintContract {
             }
         }
         None
+    }
+
+    /// Return every bounty ID `address` was an assignee on that has reached a
+    /// terminal status (`"completed"` or `"cancelled"`).
+    ///
+    /// Unlike `get_contributor_active_bounty` (which only surfaces the
+    /// current in-progress claim), this surfaces the contributor's full
+    /// bounty history. The index is maintained incrementally in
+    /// `storage::move_bounty_status` as bounties transition status, so this
+    /// call is O(1) rather than a scan. Returns an empty `Vec` if the
+    /// contributor has no completed or cancelled bounties.
+    pub fn get_contributor_bounty_history(env: Env, address: Address) -> Vec<BountyId> {
+        storage::get_contributor_history(&env, &address)
     }
 
     /// Return a bounded page of bounty IDs created by a specific creator address.
