@@ -17,6 +17,7 @@ import {
   BountyMeta,
   Contributor,
   CreateBountyParams,
+  MergeMintSdkError,
   RetryOptions,
 } from "./types";
 
@@ -40,7 +41,7 @@ function addressToScVal(address: string): xdr.ScVal {
 
 export function symbolToScVal(value: string): xdr.ScVal {
   if (value.length > 32) {
-    throw new Error(`value exceeds 32-character Symbol limit: ${value}`);
+    throw new MergeMintSdkError(`value exceeds 32-character Symbol limit: ${value}`, "INVALID_ARGUMENT");
   }
   return nativeToScVal(value, { type: "symbol" });
 }
